@@ -7,6 +7,13 @@
 
 Video player based on [ffplay](http://ffmpeg.org)
 
+## TODO
+
+- 增加视频同步开关
+- 超过2倍速不生效
+- 增加边播边录+录屏代码
+
+
 ### Download
 
 - Android:
