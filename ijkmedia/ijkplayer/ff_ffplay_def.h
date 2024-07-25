@@ -74,7 +74,7 @@
  * MAX:   ...
  */
 #define DEFAULT_FIRST_HIGH_WATER_MARK_IN_MS     (100)
-#define DEFAULT_NEXT_HIGH_WATER_MARK_IN_MS      (1 * 1000)
+#define DEFAULT_NEXT_HIGH_WATER_MARK_IN_MS      (2 * 1000)
 #define DEFAULT_LAST_HIGH_WATER_MARK_IN_MS      (5 * 1000)
 
 #define BUFFERING_CHECK_PER_BYTES               (512)
@@ -124,6 +124,13 @@
 
 /* polls for possible required screen refresh at least this often, should be less than 1/fps */
 #define REFRESH_RATE 0.01
+
+
+/*add by poe.cai 2021/05/07*/
+/* video track only situation, speed could be greater than 2.0 its depends on decoder capability */
+/* if speed > 2.0, vout polling rate should less than 10ms for prevent missing the vsync */
+#define VIDEO_ONLY_FAST_POLLING_RATE 0.001
+#define ADJUST_POLLING_RATE_THRESHOLD 2.0
 
 /* NOTE: the size must be big enough to compensate the hardware audio buffersize size */
 /* TODO: We assume that a decoded and resampled frame fits into this buffer */
@@ -571,6 +578,7 @@ typedef struct FFPlayer {
     AVInputFormat *file_iformat;
 #endif
     char *input_filename;
+    int delay_forbidden;//0延迟 ：0:关闭 1：开启add by poe 2024/07/25. 
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
@@ -756,6 +764,7 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->autoexit               = 0;
     ffp->loop                   = 1;
     ffp->framedrop              = 0; // option
+    ffp->delay_forbidden		= 0; // default close the delay option . 
     ffp->seek_at_start          = 0;
     ffp->infinite_buffer        = -1;
     ffp->show_mode              = SHOW_MODE_NONE;

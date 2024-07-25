@@ -39,6 +39,8 @@
 #include "ijksdl/android/ijksdl_android_jni.h"
 #include "ijksdl/android/ijksdl_codec_android_mediadef.h"
 #include "ijkavformat/ijkavformat.h"
+#include "ijkplayer_internal.h"
+#include "../ff_ffplay_def.h"
 
 #define JNI_MODULE_PACKAGE      "tv/danmaku/ijk/media/player"
 #define JNI_CLASS_IJKPLAYER     "tv/danmaku/ijk/media/player/IjkMediaPlayer"
@@ -576,6 +578,28 @@ LABEL_RETURN:
         (*env)->ReleaseStringUTFChars(env, name, c_name);
     ijkmp_dec_ref_p(&mp);
 }
+
+/**
+* 0延时开关. 
+*@delayOpen  0:关闭 1：开启 默认关闭. 
+*/
+static void
+IjkMediaPlayer_setZeroDelay(JNIEnv *env, jobject thiz, jint delayOpen)
+{
+    ALOGD("IjkMediaPlayer_setZeroDelay delay_forbidden =  %d",delayOpen);
+    MPTRACE("%s\n", __func__);
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+	  //给mediaplayer赋值. 
+    mp->ffplayer->delay_forbidden = delayOpen;
+    //如果打开0延迟则设置视频为主同步
+    if(delayOpen){
+      mp->ffplayer->av_sync_type  = AV_SYNC_EXTERNAL_CLOCK; 
+    } else {
+      mp->ffplayer->av_sync_type  = AV_SYNC_AUDIO_MASTER; 
+    }
+    ijkmp_dec_ref_p(&mp);
+}
+
 
 static jstring
 IjkMediaPlayer_getColorFormatName(JNIEnv *env, jclass clazz, jint mediaCodecColorFormat)
@@ -1162,6 +1186,7 @@ static JNINativeMethod g_methods[] = {
 
     { "_setOption",             "(ILjava/lang/String;Ljava/lang/String;)V", (void *) IjkMediaPlayer_setOption },
     { "_setOption",             "(ILjava/lang/String;J)V",                  (void *) IjkMediaPlayer_setOptionLong },
+    { "_setZeroDelay",          "(I)V",     (void *) IjkMediaPlayer_setZeroDelay},//设置0延迟开关. 
 
     { "_getColorFormatName",    "(I)Ljava/lang/String;",    (void *) IjkMediaPlayer_getColorFormatName },
     { "_getVideoCodecInfo",     "()Ljava/lang/String;",     (void *) IjkMediaPlayer_getVideoCodecInfo },

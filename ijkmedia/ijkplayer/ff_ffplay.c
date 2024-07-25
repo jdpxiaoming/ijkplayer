@@ -1284,7 +1284,20 @@ static double compute_target_delay(FFPlayer *ffp, double delay, VideoState *is)
     return delay;
 }
 
-static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
+/**
+ * @brief返回当前帧的缓存时间. 
+ * 
+ * @param is 
+ * @param vp 
+ * @param nextvp 
+ * @return double 
+ */
+static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp, int delay_forbidden) {
+    if(delay_forbidden >0){
+      //ALOGD("vp_duration current delay_forbidden > 0 is true!");
+		  return vp->duration;
+	  }
+	  //ALOGD("vp_duration current delay_forbidden > 0 is false!");
     if (vp->serial == nextvp->serial) {
         double duration = nextvp->pts - vp->pts;
         if (isnan(duration) || duration <= 0 || duration > is->max_frame_duration)
@@ -1347,7 +1360,7 @@ retry:
                 goto display;
 
             /* compute nominal last_duration */
-            last_duration = vp_duration(is, lastvp, vp);
+            last_duration = vp_duration(is, lastvp, vp, ffp->delay_forbidden);
             delay = compute_target_delay(ffp, last_duration, is);
 
             time= av_gettime_relative()/1000000.0;
@@ -1369,7 +1382,7 @@ retry:
 
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
-                duration = vp_duration(is, vp, nextvp);
+                duration = vp_duration(is, vp, nextvp, ffp->delay_forbidden);
                 if(!is->step && (ffp->framedrop > 0 || (ffp->framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration) {
                     frame_queue_next(&is->pictq);
                     goto retry;
