@@ -7,12 +7,13 @@
 
 Video player based on [ffplay](http://ffmpeg.org)
 
-## TODO
+## NEW!
 
 - 增加视频同步开关
 - 超过2倍速不生效
 - 增加边播边录+录屏代码
 
+https://github.com/jdpxiaoming/ijkrtspdemo
 
 ### Download
 
@@ -27,18 +28,11 @@ allprojects {
 }
 
 dependencies {
-    # required, enough for most devices.
-    compile 'tv.danmaku.ijk.media:ijkplayer-java:0.8.8'
-    compile 'tv.danmaku.ijk.media:ijkplayer-armv7a:0.8.8'
-
-    # Other ABIs: optional
-    compile 'tv.danmaku.ijk.media:ijkplayer-armv5:0.8.8'
-    compile 'tv.danmaku.ijk.media:ijkplayer-arm64:0.8.8'
-    compile 'tv.danmaku.ijk.media:ijkplayer-x86:0.8.8'
-    compile 'tv.danmaku.ijk.media:ijkplayer-x86_64:0.8.8'
-
-    # ExoPlayer as IMediaPlayer: optional, experimental
-    compile 'tv.danmaku.ijk.media:ijkplayer-exo:0.8.8'
+    implementation 'io.github.jdpxiaoming:ijkplayer-view:0.0.26'
+    implementation 'io.github.jdpxiaoming:ijkplayer-java:0.0.26'
+    implementation 'io.github.jdpxiaoming:ijkplayer-armv7a:0.0.26'
+    //看情况如果需要64位so则引入.
+    implementation 'io.github.jdpxiaoming:ijkplayer-arm64:0.0.26'
 }
 ```
 - iOS
