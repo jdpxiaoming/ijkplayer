@@ -1,1 +1,1 @@
-module-lite.sh
+module-wdz.sh
