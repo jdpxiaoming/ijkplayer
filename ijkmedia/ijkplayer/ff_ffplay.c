@@ -344,8 +344,8 @@ static int packet_queue_get_or_buffering(FFPlayer *ffp, PacketQueue *q, AVPacket
         if (new_packet < 0)
             return -1;
         else if (new_packet == 0) {
-            if (q->is_buffer_indicator && !*finished)
-                ffp_toggle_buffering(ffp, 1);
+            //if (q->is_buffer_indicator && !*finished)
+                //ffp_toggle_buffering(ffp, 1);
             new_packet = packet_queue_get(q, pkt, 1, serial);
             if (new_packet < 0)
                 return -1;
@@ -1152,6 +1152,7 @@ static double get_master_clock(VideoState *is)
     return val;
 }
 
+//设置时钟倍速播放或者减速. 
 static void check_external_clock_speed(VideoState *is) {
    if ((is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES) ||
        (is->audio_stream >= 0 && is->audioq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES)) {
@@ -1284,14 +1285,6 @@ static double compute_target_delay(FFPlayer *ffp, double delay, VideoState *is)
     return delay;
 }
 
-/**
- * @brief返回当前帧的缓存时间. 
- * 
- * @param is 
- * @param vp 
- * @param nextvp 
- * @return double 
- */
 static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp, int delay_forbidden) {
     if(delay_forbidden >0){
       //ALOGD("vp_duration current delay_forbidden > 0 is true!");
@@ -1336,6 +1329,12 @@ static void video_refresh(FFPlayer *opaque, double *remaining_time)
         *remaining_time = FFMIN(*remaining_time, is->last_vis_time + ffp->rdftspeed - time);
     }
 
+  //放开倍速2.0限制. 
+	if (ffp->pf_playback_rate > ADJUST_POLLING_RATE_THRESHOLD &&
+			!is->audio_st) {
+			*remaining_time = VIDEO_ONLY_FAST_POLLING_RATE;
+		}
+   
     if (is->video_st) {
 retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
@@ -2190,11 +2189,15 @@ static int ffplay_video_thread(void *arg)
     FFPlayer *ffp = arg;
     VideoState *is = ffp->is;
     AVFrame *frame = av_frame_alloc();
+    int delay_forbidden = ffp->delay_forbidden;
     double pts;
     double duration;
     int ret;
     AVRational tb = is->video_st->time_base;
-    AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
+    AVRational frame_rate;
+    if(delay_forbidden == 0){
+      frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
+    } 
     int64_t dst_pts = -1;
     int64_t last_dst_pts = -1;
     int retry_convert_image = 0;
@@ -2304,7 +2307,9 @@ static int ffplay_video_thread(void *arg)
             last_format = frame->format;
             last_serial = is->viddec.pkt_serial;
             last_vfilter_idx = is->vfilter_idx;
-            frame_rate = av_buffersink_get_frame_rate(filt_out);
+            if(delay_forbidden == 0){
+              frame_rate = av_buffersink_get_frame_rate(filt_out);
+            }
             SDL_UnlockMutex(ffp->vf_mutex);
         }
 
@@ -2328,7 +2333,12 @@ static int ffplay_video_thread(void *arg)
                 is->frame_last_filter_delay = 0;
             tb = av_buffersink_get_time_base(filt_out);
 #endif
-            duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+            if(delay_forbidden == 0){//关闭0延迟 默认关闭.
+              duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+            }else{
+              //直接这里写出
+			        duration=0.01;
+            }
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
             ret = queue_picture(ffp, frame, pts, duration, frame->pkt_pos, is->viddec.pkt_serial);
             av_frame_unref(frame);
@@ -3221,7 +3231,7 @@ static int read_thread(void *arg)
         }
     }
 
-    is->realtime = is_realtime(ic);
+    is->realtime = is_realtime(ic);//= 1;//
 
     av_dump_format(ic, 0, is->filename, 0);
 
@@ -3484,7 +3494,7 @@ static int read_thread(void *arg)
             }
             /* wait 10 ms */
             SDL_LockMutex(wait_mutex);
-            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            //SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
             SDL_UnlockMutex(wait_mutex);
             continue;
         }
@@ -4799,6 +4809,12 @@ void ffp_set_playback_rate(FFPlayer *ffp, float rate)
     av_log(ffp, AV_LOG_INFO, "Playback rate: %f\n", rate);
     ffp->pf_playback_rate = rate;
     ffp->pf_playback_rate_changed = 1;
+    
+    //倍速播放放开2.0限制. 
+	if (ffp->is->audio_stream < 0) {
+        av_log(ffp, AV_LOG_INFO, "didn't select an audio track, setclock speed instead");
+        set_clock_speed(&ffp->is->extclk, (double)rate);
+    }
 }
 
 void ffp_set_playback_volume(FFPlayer *ffp, float volume)
