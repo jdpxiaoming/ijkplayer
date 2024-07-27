@@ -579,6 +579,17 @@ typedef struct FFPlayer {
 #endif
     char *input_filename;
     int delay_forbidden;//0延迟 ：0:关闭 1：开启add by poe 2024/07/25. 
+    
+    //录制视频增加的变量.
+    AVFormatContext *m_ofmt_ctx;        // 用于输出的AVFormatContext结构体
+    AVOutputFormat *m_ofmt;
+    pthread_mutex_t record_mutex;       // 锁
+    int is_record;                      // 是否在录制
+    int record_error;
+
+    int is_first;                       // 第一帧数据
+    int64_t start_pts;                  // 开始录制时pts
+    int64_t start_dts;                  // 开始录制时dts
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;

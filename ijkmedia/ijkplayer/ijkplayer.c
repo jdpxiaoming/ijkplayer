@@ -470,6 +470,44 @@ int ijkmp_start(IjkMediaPlayer *mp)
     return retval;
 }
 
+//录制视频 add by poe 2024/07/27.
+int ijkmp_start_record(IjkMediaPlayer *mp,const char *file_name)
+{
+    assert(mp);
+    MPTRACE("ijkmp_startRecord()\n");
+    pthread_mutex_lock(&mp->mutex);
+    int retval = ffp_start_record(mp->ffplayer,file_name);
+    pthread_mutex_unlock(&mp->mutex);
+    MPTRACE("ijkmp_startRecord()=%d\n", retval);
+    return retval;
+}
+//结束录并制保存视频 add by poe 2024/07/27.
+int ijkmp_stop_record(IjkMediaPlayer *mp)
+{
+    assert(mp);
+    MPTRACE("ijkmp_stopRecord()\n");
+    pthread_mutex_lock(&mp->mutex);
+    int retval = ffp_stop_record(mp->ffplayer);
+    pthread_mutex_unlock(&mp->mutex);
+    MPTRACE("ijkmp_stopRecord()=%d\n", retval);
+    return retval;
+}
+
+//实现截图函数 add by poe 2024/07/27. 
+static void ijkmp_get_current_frame_l(IjkMediaPlayer *mp, uint8_t *frame_buf)
+{
+  ffp_get_current_frame_l(mp->ffplayer, frame_buf);
+}
+
+//实现截图函数 add by poe 2024/07/27. 
+void ijkmp_get_current_frame(IjkMediaPlayer *mp, uint8_t *frame_buf)
+{
+  assert(mp);
+  pthread_mutex_lock(&mp->mutex);
+  ijkmp_get_current_frame_l(mp, frame_buf);
+  pthread_mutex_unlock(&mp->mutex);
+}
+
 static int ikjmp_chkst_pause_l(int mp_state)
 {
     MPST_RET_IF_EQ(mp_state, MP_STATE_IDLE);

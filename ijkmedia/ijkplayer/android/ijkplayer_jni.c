@@ -41,6 +41,7 @@
 #include "ijkavformat/ijkavformat.h"
 #include "../ijkplayer_internal.h"
 #include "../ff_ffplay_def.h"
+#include <android/bitmap.h>
 
 #define JNI_MODULE_PACKAGE      "tv/danmaku/ijk/media/player"
 #define JNI_CLASS_IJKPLAYER     "tv/danmaku/ijk/media/player/IjkMediaPlayer"
@@ -600,6 +601,62 @@ IjkMediaPlayer_setZeroDelay(JNIEnv *env, jobject thiz, jint delayOpen)
     ijkmp_dec_ref_p(&mp);
 }
 
+//截屏
+static jboolean
+IjkMediaPlayer_getCurrentFrame(JNIEnv *env, jobject thiz, jobject bitmap)
+{
+    jboolean retval = JNI_TRUE;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: getCurrentFrame: null mp", LABEL_RETURN);
+
+    uint8_t *frame_buffer = NULL;
+
+    if (0 > AndroidBitmap_lockPixels(env, bitmap, (void **)&frame_buffer)) {
+        (*env)->ThrowNew(env, "java/io/IOException", "Unable to lock pixels.");
+        return JNI_FALSE;
+    }
+
+    ijkmp_get_current_frame(mp, frame_buffer);
+
+    if (0 > AndroidBitmap_unlockPixels(env, bitmap)) {
+        (*env)->ThrowNew(env, "java/io/IOException", "Unable to unlock pixels.");
+        return JNI_FALSE;
+    }
+
+    LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+//录播视频. 
+static jint
+IjkMediaPlayer_startRecord(JNIEnv *env, jobject thiz,jstring file)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: startRecord: null mp", LABEL_RETURN);
+    const char *nativeString = (*env)->GetStringUTFChars(env, file, 0);
+    retval = ijkmp_start_record(mp,nativeString);
+
+LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+//保存视频. 
+static jint
+IjkMediaPlayer_stopRecord(JNIEnv *env, jobject thiz)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: stopRecord: null mp", LABEL_RETURN);
+
+    retval = ijkmp_stop_record(mp);
+
+LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
 
 static jstring
 IjkMediaPlayer_getColorFormatName(JNIEnv *env, jclass clazz, jint mediaCodecColorFormat)
@@ -1187,6 +1244,9 @@ static JNINativeMethod g_methods[] = {
     { "_setOption",             "(ILjava/lang/String;Ljava/lang/String;)V", (void *) IjkMediaPlayer_setOption },
     { "_setOption",             "(ILjava/lang/String;J)V",                  (void *) IjkMediaPlayer_setOptionLong },
     { "_setZeroDelay",          "(I)V",     (void *) IjkMediaPlayer_setZeroDelay},//设置0延迟开关. 
+    { "_startRecord",            "(Ljava/lang/String;)I",      (void *) IjkMediaPlayer_startRecord },
+    { "_stopRecord",             "()I",      (void *) IjkMediaPlayer_stopRecord },
+    { "_getCurrentFrame",        "(Landroid/graphics/Bitmap;)Z",      (void *) IjkMediaPlayer_getCurrentFrame },
 
     { "_getColorFormatName",    "(I)Ljava/lang/String;",    (void *) IjkMediaPlayer_getColorFormatName },
     { "_getVideoCodecInfo",     "()Ljava/lang/String;",     (void *) IjkMediaPlayer_getVideoCodecInfo },
