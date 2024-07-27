@@ -346,6 +346,7 @@ static int packet_queue_get_or_buffering(FFPlayer *ffp, PacketQueue *q, AVPacket
         else if (new_packet == 0) {
             //if (q->is_buffer_indicator && !*finished)
                 //ffp_toggle_buffering(ffp, 1);
+                //解决flv 2s延迟???
             new_packet = packet_queue_get(q, pkt, 1, serial);
             if (new_packet < 0)
                 return -1;
@@ -1285,6 +1286,14 @@ static double compute_target_delay(FFPlayer *ffp, double delay, VideoState *is)
     return delay;
 }
 
+/**
+ * @brief返回当前帧的pts等待时间. 
+ * 
+ * @param is 
+ * @param vp 
+ * @param nextvp 
+ * @return double 
+ */
 static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp, int delay_forbidden) {
     if(delay_forbidden >0){
       //ALOGD("vp_duration current delay_forbidden > 0 is true!");

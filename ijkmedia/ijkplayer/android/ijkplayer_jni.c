@@ -39,7 +39,7 @@
 #include "ijksdl/android/ijksdl_android_jni.h"
 #include "ijksdl/android/ijksdl_codec_android_mediadef.h"
 #include "ijkavformat/ijkavformat.h"
-#include "ijkplayer_internal.h"
+#include "../ijkplayer_internal.h"
 #include "../ff_ffplay_def.h"
 
 #define JNI_MODULE_PACKAGE      "tv/danmaku/ijk/media/player"
