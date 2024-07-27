@@ -3111,6 +3111,7 @@ static int read_thread(void *arg)
     int64_t prev_io_tick_counter = 0;
     int64_t io_tick_counter = 0;
     int init_ijkmeta = 0;
+    int64_t recordTs;//读取文件标签.
 
     if (!wait_mutex) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
@@ -3652,6 +3653,20 @@ static int read_thread(void *arg)
                     prev_io_tick_counter = io_tick_counter;
                     ffp_check_buffering_l(ffp);
                 }
+            }
+        }
+        //av_log(ffp, AV_LOG_INFO, "common pkt->pts:%ld",pkt->pts);
+        //av_log(ffp, AV_LOG_INFO, "common pkt->dts:%ld",pkt->dts);
+
+		// if (!ffp->is_first && pkt->pts == pkt->dts) { // 获取开始录制前dts等于pts最后的值，用于
+            //ffp->start_pts = pkt->pts;
+            //ffp->start_dts = pkt->dts;
+        // }
+        if (ffp->is_record) { // 可以录制时，写入文件
+            recordTs++;
+            if (0 != ffp_record_file(ffp, pkt,recordTs)) {
+                ffp->record_error = 1;
+                ffp_stop_record(ffp);
             }
         }
     }
@@ -5214,4 +5229,75 @@ void ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf)
   }
   
   ALOGD("=============>end snapshot\n");
+}
+
+
+//保存文件
+int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
+{
+    assert(ffp);
+    VideoState *is = ffp->is;
+    int ret = 0;
+    AVStream *in_stream;
+    AVStream *out_stream;
+
+    if (ffp->is_record) {
+        if (packet == NULL) {
+            ffp->record_error = 1;
+            av_log(ffp, AV_LOG_ERROR, "packet == NULL");
+            return -1;
+        }
+
+        AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
+        av_new_packet(pkt, 0);
+        if (0 == av_packet_ref(pkt, packet)) {
+            pthread_mutex_lock(&ffp->record_mutex);
+
+            av_log(ffp, AV_LOG_INFO, "ffp->start_pts:%"PRId64"",ffp->start_pts);
+            av_log(ffp, AV_LOG_INFO, "ffp->start_dts:%"PRId64"",ffp->start_dts);
+
+            av_log(ffp, AV_LOG_INFO, "ffp->is_first:%"PRId64"",ffp->is_first);
+            if (!ffp->is_first) { // 录制的第一帧，时间从0开始
+                ffp->is_first = 1;
+                pkt->pts = 0;
+                pkt->dts = 0;
+            } else { // 之后的每一帧都要减去，点击开始录制时的值，这样的时间才是正确的
+                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                pkt->dts = abs(pkt->dts - ffp->start_dts);
+            }
+
+            av_log(ffp, AV_LOG_INFO, "recordPts:%"PRId64"",recordTs);
+            av_log(ffp, AV_LOG_INFO, "recordDts:%"PRId64"",recordTs);
+
+            pkt->pts = recordTs;
+            pkt->dts = recordTs;
+
+            in_stream  = is->ic->streams[pkt->stream_index];
+            out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
+
+            // 转换PTS/DTS
+            pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+
+            pkt->pos = -1;
+
+
+            av_log(ffp, AV_LOG_INFO, "inner pkt->pts:%"PRId64"",pkt->pts);
+            av_log(ffp, AV_LOG_INFO, "inner pkt->dts:%"PRId64"",pkt->dts);
+            av_log(ffp, AV_LOG_INFO, "inner pkt->duration:%"PRId64"",pkt->duration);
+
+
+            av_log(ffp, AV_LOG_INFO, "av_interleaved_write_frame\n");
+            // 写入一个AVPacket到输出文件
+            if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
+                av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
+            }
+            av_packet_unref(pkt);
+            pthread_mutex_unlock(&ffp->record_mutex);
+        } else {
+            av_log(ffp, AV_LOG_ERROR, "av_packet_ref == NULL");
+        }
+    }
+    return ret;
 }
