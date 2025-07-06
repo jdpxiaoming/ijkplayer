@@ -3664,7 +3664,7 @@ static int read_thread(void *arg)
         // }
         if (ffp->is_record) { // 可以录制时，写入文件
             recordTs++;
-            if (0 != ffp_record_file(ffp, pkt,recordTs)) {
+            if (0 != ffp_record_file(ffp, pkt, recordTs)) {
                 ffp->record_error = 1;
                 ffp_stop_record(ffp);
             }
@@ -5253,27 +5253,40 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
         if (0 == av_packet_ref(pkt, packet)) {
             pthread_mutex_lock(&ffp->record_mutex);
 
-            av_log(ffp, AV_LOG_INFO, "ffp->start_pts:%"PRId64"",ffp->start_pts);
-            av_log(ffp, AV_LOG_INFO, "ffp->start_dts:%"PRId64"",ffp->start_dts);
-
-            av_log(ffp, AV_LOG_INFO, "ffp->is_first:%"PRId64"",ffp->is_first);
-            if (!ffp->is_first) { // 录制的第一帧，时间从0开始
-                ffp->is_first = 1;
-                pkt->pts = 0;
-                pkt->dts = 0;
-            } else { // 之后的每一帧都要减去，点击开始录制时的值，这样的时间才是正确的
-                pkt->pts = abs(pkt->pts - ffp->start_pts);
-                pkt->dts = abs(pkt->dts - ffp->start_dts);
-            }
-
-            av_log(ffp, AV_LOG_INFO, "recordPts:%"PRId64"",recordTs);
-            av_log(ffp, AV_LOG_INFO, "recordDts:%"PRId64"",recordTs);
-
-            pkt->pts = recordTs;
-            pkt->dts = recordTs;
-
             in_stream  = is->ic->streams[pkt->stream_index];
             out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
+
+            // 检查是否是视频流
+            int is_video = (pkt->stream_index == is->video_stream);
+            
+            // 检查是否有音频流
+            int has_audio = (is->audio_stream >= 0);
+            
+            if (!ffp->is_first) { 
+                // 录制的第一帧，时间从0开始
+                ffp->is_first = 1;
+                ffp->start_pts = pkt->pts;
+                ffp->start_dts = pkt->dts;
+                pkt->pts = 0;
+                pkt->dts = 0;
+            } else {
+                if (has_audio) {
+                    // 有音频流时，按照正常视频速度录制
+                    pkt->pts = abs(pkt->pts - ffp->start_pts);
+                    pkt->dts = abs(pkt->dts - ffp->start_dts);
+                } else if (is_video) {
+                    // 没有音频流且是视频流时，保留原始时间戳（保持原始倍速）
+                    // 只需要减去起始时间戳，保持相对时间关系
+                    pkt->pts = abs(pkt->pts - ffp->start_pts);
+                    pkt->dts = abs(pkt->dts - ffp->start_dts);
+                    
+                    // 不使用recordTs，使用原始时间戳
+                } else {
+                    // 其他类型的流（如字幕等）
+                    pkt->pts = abs(pkt->pts - ffp->start_pts);
+                    pkt->dts = abs(pkt->dts - ffp->start_dts);
+                }
+            }
 
             // 转换PTS/DTS
             pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
@@ -5282,13 +5295,9 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
 
             pkt->pos = -1;
 
+            av_log(ffp, AV_LOG_DEBUG, "inner pkt->pts:%"PRId64", pkt->dts:%"PRId64", pkt->duration:%"PRId64", is_video:%d, has_audio:%d", 
+                   pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
 
-            av_log(ffp, AV_LOG_INFO, "inner pkt->pts:%"PRId64"",pkt->pts);
-            av_log(ffp, AV_LOG_INFO, "inner pkt->dts:%"PRId64"",pkt->dts);
-            av_log(ffp, AV_LOG_INFO, "inner pkt->duration:%"PRId64"",pkt->duration);
-
-
-            av_log(ffp, AV_LOG_INFO, "av_interleaved_write_frame\n");
             // 写入一个AVPacket到输出文件
             if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
