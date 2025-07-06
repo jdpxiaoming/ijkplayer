@@ -5181,9 +5181,120 @@ int ffp_stop_record(FFPlayer *ffp)
 {
     assert(ffp);
     if (ffp->is_record) {
+        // 检查是否满足最小录制时间
+        int64_t current_time = av_gettime() / 1000;
+        int64_t record_duration = current_time - ffp->record_start_time;
+        
+        if (record_duration < ffp->min_record_time) {
+            av_log(ffp, AV_LOG_WARNING, "Recording time too short (%"PRId64" ms), minimum is %"PRId64" ms. Continuing recording...", 
+                   record_duration, ffp->min_record_time);
+            
+            // 不立即停止，等待一段时间
+            int sleep_time = (int)(ffp->min_record_time - record_duration);
+            if (sleep_time > 0 && sleep_time < 10000) { // 最多等待10秒
+                av_log(ffp, AV_LOG_INFO, "Waiting %d ms before stopping recording", sleep_time);
+                av_usleep(sleep_time * 1000);
+            }
+        }
+        
         av_log(ffp, AV_LOG_INFO, "Stopping recording...");
+        
+        // 先设置标志位，防止新的数据继续写入
         ffp->is_record = 0;
         pthread_mutex_lock(&ffp->record_mutex);
+        
+        // 如果是转码模式，先尝试刷新编码器缓冲区
+        if (ffp->need_transcode) {
+            av_log(ffp, AV_LOG_INFO, "Flushing encoder buffers before stopping");
+            
+            // 刷新视频编码器
+            if (ffp->video_enc_ctx && ffp->out_video_stream_index >= 0) {
+                AVPacket enc_pkt;
+                int got_packet = 0;
+                int ret = 0;
+                
+                av_init_packet(&enc_pkt);
+                enc_pkt.data = NULL;
+                enc_pkt.size = 0;
+                
+                // 发送NULL帧来刷新缓冲区
+                av_log(ffp, AV_LOG_DEBUG, "Flushing video encoder");
+                while (1) {
+                    ret = avcodec_encode_video2(ffp->video_enc_ctx, &enc_pkt, NULL, &got_packet);
+                    if (ret < 0 || !got_packet)
+                        break;
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "Got delayed video packet during flush, size=%d", enc_pkt.size);
+                    
+                    // 设置流索引
+                    enc_pkt.stream_index = ffp->out_video_stream_index;
+                    
+                    // 转换时间戳
+                    enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
+                                                 ffp->video_enc_ctx->time_base,
+                                                 ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index]->time_base,
+                                                 AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                    enc_pkt.dts = av_rescale_q_rnd(enc_pkt.dts,
+                                                 ffp->video_enc_ctx->time_base,
+                                                 ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index]->time_base,
+                                                 AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                    
+                    // 写入文件
+                    ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error writing delayed video frame: %s", av_err2str(ret));
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "Successfully wrote delayed video packet");
+                    }
+                    
+                    av_packet_unref(&enc_pkt);
+                }
+            }
+            
+            // 刷新音频编码器
+            if (ffp->audio_enc_ctx && ffp->out_audio_stream_index >= 0) {
+                AVPacket enc_pkt;
+                int got_packet = 0;
+                int ret = 0;
+                
+                av_init_packet(&enc_pkt);
+                enc_pkt.data = NULL;
+                enc_pkt.size = 0;
+                
+                // 发送NULL帧来刷新缓冲区
+                av_log(ffp, AV_LOG_DEBUG, "Flushing audio encoder");
+                while (1) {
+                    ret = avcodec_encode_audio2(ffp->audio_enc_ctx, &enc_pkt, NULL, &got_packet);
+                    if (ret < 0 || !got_packet)
+                        break;
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "Got delayed audio packet during flush, size=%d", enc_pkt.size);
+                    
+                    // 设置流索引
+                    enc_pkt.stream_index = ffp->out_audio_stream_index;
+                    
+                    // 转换时间戳
+                    enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
+                                                 ffp->audio_enc_ctx->time_base,
+                                                 ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
+                                                 AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                    enc_pkt.dts = av_rescale_q_rnd(enc_pkt.dts,
+                                                 ffp->audio_enc_ctx->time_base,
+                                                 ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
+                                                 AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                    
+                    // 写入文件
+                    ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error writing delayed audio frame: %s", av_err2str(ret));
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "Successfully wrote delayed audio packet");
+                    }
+                    
+                    av_packet_unref(&enc_pkt);
+                }
+            }
+        }
         
         // 写入文件尾并关闭文件
         if (ffp->m_ofmt_ctx != NULL) {
@@ -5434,8 +5545,19 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         av_log(ffp, AV_LOG_DEBUG, "No packet produced from video encoding");
                     }
                 } else {
-                    av_log(ffp, AV_LOG_DEBUG, "No frame decoded from video packet");
+                    // 添加静态计数器来跟踪解码失败次数
+                    static int decode_failed_count = 0;
+                    decode_failed_count++;
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "No frame decoded from video packet (%d attempts)", decode_failed_count);
                     av_frame_free(&frame);
+                    
+                    // 如果解码失败次数过多，但还没有成功解码过任何帧，则不要设置错误标志
+                    // 这样可以让录制继续，直到成功解码出第一帧
+                    if (decode_failed_count > 30 && !ffp->is_first) {
+                        av_log(ffp, AV_LOG_WARNING, "Failed to decode frames after multiple attempts, but continuing to try");
+                        // 不返回错误，继续尝试解码
+                    }
                 }
             } else if (packet->stream_index == is->audio_stream && ffp->out_audio_stream_index >= 0) {
                 // 音频转码
@@ -5677,17 +5799,20 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
     int ret = 0;
     AVCodecContext *enc_ctx = NULL;
     AVCodec *encoder = NULL;
+    AVDictionary *opts = NULL;
     
     if (type == AVMEDIA_TYPE_VIDEO) {
         encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
         if (!encoder) {
-            av_log(ffp, AV_LOG_ERROR, "Cannot find video encoder\n");
+            av_log(ffp, AV_LOG_ERROR, "Cannot find H.264 video encoder");
             return AVERROR_ENCODER_NOT_FOUND;
         }
         
+        av_log(ffp, AV_LOG_DEBUG, "Using video encoder: %s", encoder->name);
+        
         enc_ctx = avcodec_alloc_context3(encoder);
         if (!enc_ctx) {
-            av_log(ffp, AV_LOG_ERROR, "Cannot allocate video encoder context\n");
+            av_log(ffp, AV_LOG_ERROR, "Cannot allocate video encoder context");
             return AVERROR(ENOMEM);
         }
         
@@ -5696,42 +5821,93 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         enc_ctx->width = dec_ctx->width;
         enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio;
         enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;  // H.264通常使用YUV420P
-        enc_ctx->time_base = av_inv_q(dec_ctx->framerate);
-        if (enc_ctx->time_base.num == 0 || enc_ctx->time_base.den == 0) {
-            enc_ctx->time_base = (AVRational){1, 25};  // 默认25fps
-        }
-        enc_ctx->framerate = av_inv_q(enc_ctx->time_base);
         
-        // 设置一些编码器选项
+        // 设置时间基准和帧率
+        if (dec_ctx->framerate.num > 0 && dec_ctx->framerate.den > 0) {
+            enc_ctx->framerate = dec_ctx->framerate;
+            enc_ctx->time_base = av_inv_q(dec_ctx->framerate);
+        } else {
+            enc_ctx->framerate = (AVRational){25, 1};  // 默认25fps
+            enc_ctx->time_base = (AVRational){1, 25};
+        }
+        
+        av_log(ffp, AV_LOG_DEBUG, "Video framerate set to %d/%d", 
+               enc_ctx->framerate.num, enc_ctx->framerate.den);
+        
+        // 设置编码器选项
         enc_ctx->bit_rate = 2000000;  // 2Mbps
-        enc_ctx->gop_size = 12;
-        enc_ctx->max_b_frames = 0;
+        enc_ctx->rc_min_rate = enc_ctx->bit_rate;
+        enc_ctx->rc_max_rate = enc_ctx->bit_rate;
+        enc_ctx->rc_buffer_size = enc_ctx->bit_rate;
+        
+        // 设置GOP（关键帧间隔）
+        enc_ctx->gop_size = (int)(enc_ctx->framerate.num / enc_ctx->framerate.den) * 2;  // 约2秒一个关键帧
+        enc_ctx->keyint_min = enc_ctx->gop_size / 2;
+        enc_ctx->max_b_frames = 0;  // 不使用B帧，减少延迟
+        
+        // 设置编码质量
+        enc_ctx->qmin = 10;
+        enc_ctx->qmax = 51;
+        
+        // 设置全局头部标志（MP4需要）
         enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        
+        // 设置线程数
+        enc_ctx->thread_count = 4;
+        
+        // 设置编码器特定选项
+        av_dict_set(&opts, "preset", "superfast", 0);  // 超快速预设
+        av_dict_set(&opts, "tune", "zerolatency", 0);  // 零延迟调优
+        av_dict_set(&opts, "profile", "baseline", 0);  // 基准配置文件，兼容性最好
         
         ffp->video_enc_ctx = enc_ctx;
     } else if (type == AVMEDIA_TYPE_AUDIO) {
         encoder = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (!encoder) {
-            av_log(ffp, AV_LOG_ERROR, "Cannot find audio encoder\n");
+            av_log(ffp, AV_LOG_ERROR, "Cannot find AAC audio encoder");
             return AVERROR_ENCODER_NOT_FOUND;
         }
         
+        av_log(ffp, AV_LOG_DEBUG, "Using audio encoder: %s", encoder->name);
+        
         enc_ctx = avcodec_alloc_context3(encoder);
         if (!enc_ctx) {
-            av_log(ffp, AV_LOG_ERROR, "Cannot allocate audio encoder context\n");
+            av_log(ffp, AV_LOG_ERROR, "Cannot allocate audio encoder context");
             return AVERROR(ENOMEM);
         }
         
         // 设置音频编码参数
         enc_ctx->sample_rate = dec_ctx->sample_rate;
+        
+        // 确保通道布局有效
         enc_ctx->channel_layout = dec_ctx->channel_layout;
         if (!enc_ctx->channel_layout) {
             enc_ctx->channel_layout = av_get_default_channel_layout(dec_ctx->channels);
         }
         enc_ctx->channels = av_get_channel_layout_nb_channels(enc_ctx->channel_layout);
-        enc_ctx->sample_fmt = encoder->sample_fmts[0];  // 使用编码器支持的第一种采样格式
+        
+        // 确保使用AAC编码器支持的采样格式
+        enc_ctx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // AAC通常使用浮点平面格式
+        
+        // 检查编码器是否支持这种采样格式
+        int i;
+        for (i = 0; encoder->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
+            if (encoder->sample_fmts[i] == enc_ctx->sample_fmt) {
+                break;
+            }
+        }
+        if (encoder->sample_fmts[i] == AV_SAMPLE_FMT_NONE) {
+            // 如果不支持，使用第一个支持的格式
+            enc_ctx->sample_fmt = encoder->sample_fmts[0];
+            av_log(ffp, AV_LOG_WARNING, "Audio encoder doesn't support format FLTP, using %d instead", 
+                   enc_ctx->sample_fmt);
+        }
+        
         enc_ctx->time_base = (AVRational){1, enc_ctx->sample_rate};
         enc_ctx->bit_rate = 128000;  // 128kbps
+        
+        // 设置编码器特定选项
+        av_dict_set(&opts, "strict", "experimental", 0);  // 允许实验性AAC编码器
         
         ffp->audio_enc_ctx = enc_ctx;
     } else {
@@ -5739,21 +5915,41 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
     }
     
     // 打开编码器
-    ret = avcodec_open2(enc_ctx, encoder, NULL);
+    ret = avcodec_open2(enc_ctx, encoder, &opts);
     if (ret < 0) {
-        av_log(ffp, AV_LOG_ERROR, "Cannot open %s encoder\n", 
-               type == AVMEDIA_TYPE_VIDEO ? "video" : "audio");
+        av_log(ffp, AV_LOG_ERROR, "Cannot open %s encoder: %s", 
+               type == AVMEDIA_TYPE_VIDEO ? "video" : "audio", av_err2str(ret));
+        av_dict_free(&opts);
         return ret;
     }
+    
+    // 检查未使用的选项
+    if (av_dict_count(opts) > 0) {
+        av_log(ffp, AV_LOG_WARNING, "Some encoder options were not used:");
+        AVDictionaryEntry *t = NULL;
+        while ((t = av_dict_get(opts, "", t, AV_DICT_IGNORE_SUFFIX))) {
+            av_log(ffp, AV_LOG_WARNING, " %s=%s", t->key, t->value);
+        }
+    }
+    
+    av_dict_free(&opts);
     
     // 将编码器参数复制到输出流
     ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
     if (ret < 0) {
-        av_log(ffp, AV_LOG_ERROR, "Failed to copy encoder parameters to output stream\n");
+        av_log(ffp, AV_LOG_ERROR, "Failed to copy encoder parameters to output stream: %s", 
+               av_err2str(ret));
         return ret;
     }
     
     out_stream->time_base = enc_ctx->time_base;
+    
+    av_log(ffp, AV_LOG_INFO, "Transcoder initialized for %s: %dx%d, %d channels, %d Hz", 
+           type == AVMEDIA_TYPE_VIDEO ? "video" : "audio",
+           type == AVMEDIA_TYPE_VIDEO ? enc_ctx->width : 0,
+           type == AVMEDIA_TYPE_VIDEO ? enc_ctx->height : 0,
+           type == AVMEDIA_TYPE_AUDIO ? enc_ctx->channels : 0,
+           type == AVMEDIA_TYPE_AUDIO ? enc_ctx->sample_rate : 0);
     
     return 0;
 }
@@ -5921,6 +6117,33 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         goto end;
     }
     
+    // 如果有视频编码器，设置关键参数
+    if (ffp->video_enc_ctx) {
+        // 设置关键帧间隔
+        ffp->video_enc_ctx->gop_size = 10;
+        // 设置B帧数量为0，提高实时性
+        ffp->video_enc_ctx->max_b_frames = 0;
+        // 设置为恒定比特率模式
+        ffp->video_enc_ctx->bit_rate = 2000000; // 2 Mbps
+        // 强制关键帧间隔
+        ffp->video_enc_ctx->keyint_min = 10;
+        // 设置时间基准
+        ffp->video_enc_ctx->time_base = (AVRational){1, 25};
+        
+        av_log(ffp, AV_LOG_DEBUG, "Video encoder configured: %dx%d, bitrate=%d, gop=%d", 
+               ffp->video_enc_ctx->width, ffp->video_enc_ctx->height,
+               (int)ffp->video_enc_ctx->bit_rate, ffp->video_enc_ctx->gop_size);
+    }
+    
+    // 如果有音频编码器，设置关键参数
+    if (ffp->audio_enc_ctx) {
+        // 设置音频比特率
+        ffp->audio_enc_ctx->bit_rate = 128000; // 128 kbps
+        av_log(ffp, AV_LOG_DEBUG, "Audio encoder configured: channels=%d, sample_rate=%d, bitrate=%d", 
+               ffp->audio_enc_ctx->channels, ffp->audio_enc_ctx->sample_rate,
+               (int)ffp->audio_enc_ctx->bit_rate);
+    }
+    
     av_dump_format(ffp->m_ofmt_ctx, 0, file_name, 1);
     
     // 打开输出文件
@@ -5944,6 +6167,11 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     av_log(ffp, AV_LOG_INFO, "Transcode recording started successfully");
     ffp->is_record = 1;
     ffp->record_error = 0;
+    
+    // 设置最小录制时间（毫秒），防止录制过早停止
+    ffp->min_record_time = 5000;  // 至少录制5秒
+    ffp->record_start_time = av_gettime() / 1000;  // 当前时间（毫秒）
+    
     pthread_mutex_init(&ffp->record_mutex, NULL);
     
     return 0;

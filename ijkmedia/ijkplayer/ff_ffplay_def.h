@@ -600,6 +600,8 @@ typedef struct FFPlayer {
     int is_first;                       // 第一帧数据
     int64_t start_pts;                  // 开始录制时pts
     int64_t start_dts;                  // 开始录制时dts
+    int64_t min_record_time;            // 最小录制时间(毫秒)
+    int64_t record_start_time;          // 录制开始时间(毫秒)
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
