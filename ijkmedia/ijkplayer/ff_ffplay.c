@@ -5181,14 +5181,27 @@ int ffp_stop_record(FFPlayer *ffp)
 {
     assert(ffp);
     if (ffp->is_record) {
+        av_log(ffp, AV_LOG_INFO, "Stopping recording...");
         ffp->is_record = 0;
         pthread_mutex_lock(&ffp->record_mutex);
         
         // 写入文件尾并关闭文件
         if (ffp->m_ofmt_ctx != NULL) {
-            av_write_trailer(ffp->m_ofmt_ctx);
+            int ret = av_write_trailer(ffp->m_ofmt_ctx);
+            if (ret < 0) {
+                av_log(ffp, AV_LOG_ERROR, "Error writing trailer: %s", av_err2str(ret));
+            } else {
+                av_log(ffp, AV_LOG_INFO, "Successfully wrote file trailer");
+            }
+            
             if (ffp->m_ofmt_ctx && !(ffp->m_ofmt->flags & AVFMT_NOFILE)) {
-                avio_close(ffp->m_ofmt_ctx->pb);
+                avio_flush(ffp->m_ofmt_ctx->pb);
+                ret = avio_close(ffp->m_ofmt_ctx->pb);
+                if (ret < 0) {
+                    av_log(ffp, AV_LOG_ERROR, "Error closing output file: %s", av_err2str(ret));
+                } else {
+                    av_log(ffp, AV_LOG_INFO, "Successfully closed output file");
+                }
             }
             avformat_free_context(ffp->m_ofmt_ctx);
             ffp->m_ofmt_ctx = NULL;
@@ -5196,12 +5209,16 @@ int ffp_stop_record(FFPlayer *ffp)
         
         // 清理转码资源
         if (ffp->need_transcode) {
+            av_log(ffp, AV_LOG_INFO, "Cleaning up transcode resources");
+            
             if (ffp->video_enc_ctx) {
+                avcodec_flush_buffers(ffp->video_enc_ctx);
                 avcodec_free_context(&ffp->video_enc_ctx);
                 ffp->video_enc_ctx = NULL;
             }
             
             if (ffp->audio_enc_ctx) {
+                avcodec_flush_buffers(ffp->audio_enc_ctx);
                 avcodec_free_context(&ffp->audio_enc_ctx);
                 ffp->audio_enc_ctx = NULL;
             }
@@ -5227,9 +5244,9 @@ int ffp_stop_record(FFPlayer *ffp)
         ffp->is_first = 0;
         pthread_mutex_unlock(&ffp->record_mutex);
         pthread_mutex_destroy(&ffp->record_mutex);
-        av_log(ffp, AV_LOG_DEBUG, "stopRecord ok\n");
+        av_log(ffp, AV_LOG_INFO, "Recording stopped successfully");
     } else {
-        av_log(ffp, AV_LOG_ERROR, "don't need stopRecord\n");
+        av_log(ffp, AV_LOG_WARNING, "Recording is not active, no need to stop");
     }
     return 0;
 }
@@ -5285,30 +5302,40 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
 
         // 如果需要转码
         if (ffp->need_transcode) {
+            av_log(ffp, AV_LOG_DEBUG, "Processing packet for transcoding, stream_index=%d, size=%d", 
+                   packet->stream_index, packet->size);
+                   
             // 检查是否是视频或音频流
             if (packet->stream_index == is->video_stream && ffp->out_video_stream_index >= 0) {
                 // 视频转码
                 AVFrame *frame = av_frame_alloc();
                 if (!frame) {
+                    av_log(ffp, AV_LOG_ERROR, "Failed to allocate video frame");
                     pthread_mutex_unlock(&ffp->record_mutex);
                     return AVERROR(ENOMEM);
                 }
 
                 // 解码视频帧
                 int got_frame = 0;
+                av_log(ffp, AV_LOG_DEBUG, "Decoding video packet for recording, size=%d", packet->size);
                 ret = avcodec_decode_video2(is->viddec.avctx, frame, &got_frame, packet);
                 if (ret < 0) {
+                    av_log(ffp, AV_LOG_ERROR, "Error decoding video frame: %s", av_err2str(ret));
                     av_frame_free(&frame);
                     pthread_mutex_unlock(&ffp->record_mutex);
                     return ret;
                 }
 
                 if (got_frame) {
+                    av_log(ffp, AV_LOG_DEBUG, "Got video frame: %dx%d, format=%d, pts=%"PRId64, 
+                           frame->width, frame->height, frame->format, frame->pts);
+                    
                     // 设置时间戳
                     if (!ffp->is_first) {
                         ffp->is_first = 1;
                         ffp->start_pts = frame->pts;
                         frame->pts = 0;
+                        av_log(ffp, AV_LOG_DEBUG, "First video frame, start_pts=%"PRId64, ffp->start_pts);
                     } else {
                         frame->pts = abs(frame->pts - ffp->start_pts);
                     }
@@ -5324,6 +5351,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                                                        ffp->video_enc_ctx->height, 1);
                     uint8_t *buffer = av_malloc(size);
                     if (!buffer) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate buffer for video conversion");
                         av_frame_free(&frame);
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return AVERROR(ENOMEM);
@@ -5334,6 +5362,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                                         ffp->video_enc_ctx->width, ffp->video_enc_ctx->height, 1);
 
                     // 转换像素格式
+                    av_log(ffp, AV_LOG_DEBUG, "Converting video format with sws_scale");
                     sws_scale(ffp->sws_ctx, (const uint8_t * const*)frame->data,
                              frame->linesize, 0, frame->height,
                              ffp->tmp_frame->data, ffp->tmp_frame->linesize);
@@ -5353,21 +5382,29 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     enc_pkt.size = 0;
 
                     int got_packet = 0;
+                    av_log(ffp, AV_LOG_DEBUG, "Encoding video frame, pts=%"PRId64, ffp->tmp_frame->pts);
                     ret = avcodec_encode_video2(ffp->video_enc_ctx, &enc_pkt, ffp->tmp_frame, &got_packet);
                     
                     av_free(buffer);
                     av_frame_free(&frame);
                     
                     if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error encoding video frame: %s", av_err2str(ret));
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return ret;
                     }
 
                     if (got_packet) {
+                        av_log(ffp, AV_LOG_DEBUG, "Got encoded video packet, size=%d, pts=%"PRId64, 
+                               enc_pkt.size, enc_pkt.pts);
+                        
                         // 设置流索引
                         enc_pkt.stream_index = ffp->out_video_stream_index;
                         
                         // 转换时间戳
+                        av_log(ffp, AV_LOG_DEBUG, "Rescaling video timestamps, before: pts=%"PRId64", dts=%"PRId64,
+                               enc_pkt.pts, enc_pkt.dts);
+                               
                         enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
                                                      ffp->video_enc_ctx->time_base,
                                                      ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index]->time_base,
@@ -5380,38 +5417,56 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                                                       ffp->video_enc_ctx->time_base,
                                                       ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index]->time_base);
                         
+                        av_log(ffp, AV_LOG_DEBUG, "Rescaled video timestamps, after: pts=%"PRId64", dts=%"PRId64,
+                               enc_pkt.pts, enc_pkt.dts);
+                        
                         // 写入文件
+                        av_log(ffp, AV_LOG_DEBUG, "Writing video packet to file, size=%d", enc_pkt.size);
                         ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
                         if (ret < 0) {
-                            av_log(ffp, AV_LOG_ERROR, "Error writing video frame\n");
+                            av_log(ffp, AV_LOG_ERROR, "Error writing video frame: %s", av_err2str(ret));
+                        } else {
+                            av_log(ffp, AV_LOG_DEBUG, "Successfully wrote video packet");
                         }
                         
                         av_packet_unref(&enc_pkt);
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "No packet produced from video encoding");
                     }
+                } else {
+                    av_log(ffp, AV_LOG_DEBUG, "No frame decoded from video packet");
+                    av_frame_free(&frame);
                 }
             } else if (packet->stream_index == is->audio_stream && ffp->out_audio_stream_index >= 0) {
                 // 音频转码
                 AVFrame *frame = av_frame_alloc();
                 if (!frame) {
+                    av_log(ffp, AV_LOG_ERROR, "Failed to allocate audio frame");
                     pthread_mutex_unlock(&ffp->record_mutex);
                     return AVERROR(ENOMEM);
                 }
 
                 // 解码音频帧
                 int got_frame = 0;
+                av_log(ffp, AV_LOG_DEBUG, "Decoding audio packet for recording, size=%d", packet->size);
                 ret = avcodec_decode_audio4(is->auddec.avctx, frame, &got_frame, packet);
                 if (ret < 0) {
+                    av_log(ffp, AV_LOG_ERROR, "Error decoding audio frame: %s", av_err2str(ret));
                     av_frame_free(&frame);
                     pthread_mutex_unlock(&ffp->record_mutex);
                     return ret;
                 }
 
                 if (got_frame) {
+                    av_log(ffp, AV_LOG_DEBUG, "Got audio frame: samples=%d, format=%d, pts=%"PRId64, 
+                           frame->nb_samples, frame->format, frame->pts);
+                    
                     // 设置时间戳
                     if (!ffp->is_first) {
                         ffp->is_first = 1;
                         ffp->start_pts = frame->pts;
                         frame->pts = 0;
+                        av_log(ffp, AV_LOG_DEBUG, "First audio frame, start_pts=%"PRId64, ffp->start_pts);
                     } else {
                         frame->pts = abs(frame->pts - ffp->start_pts);
                     }
@@ -5420,9 +5475,13 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     int dst_nb_samples = av_rescale_rnd(swr_get_delay(ffp->swr_ctx_record, frame->sample_rate) + frame->nb_samples,
                                                       ffp->audio_enc_ctx->sample_rate, frame->sample_rate, AV_ROUND_UP);
                     
+                    av_log(ffp, AV_LOG_DEBUG, "Resampling audio: in_rate=%d, out_rate=%d, dst_samples=%d", 
+                           frame->sample_rate, ffp->audio_enc_ctx->sample_rate, dst_nb_samples);
+                    
                     // 分配临时帧
                     AVFrame *resampled_frame = av_frame_alloc();
                     if (!resampled_frame) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate resampled frame");
                         av_frame_free(&frame);
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return AVERROR(ENOMEM);
@@ -5435,6 +5494,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     
                     ret = av_frame_get_buffer(resampled_frame, 0);
                     if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate buffer for resampled frame: %s", av_err2str(ret));
                         av_frame_free(&frame);
                         av_frame_free(&resampled_frame);
                         pthread_mutex_unlock(&ffp->record_mutex);
@@ -5446,11 +5506,14 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                                      resampled_frame->data, dst_nb_samples,
                                      (const uint8_t **)frame->data, frame->nb_samples);
                     if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to resample audio: %s", av_err2str(ret));
                         av_frame_free(&frame);
                         av_frame_free(&resampled_frame);
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return ret;
                     }
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "Audio resampling successful, output samples=%d", ret);
                     
                     // 设置时间戳
                     resampled_frame->pts = av_rescale_q(frame->pts, 
@@ -5464,21 +5527,29 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     enc_pkt.size = 0;
                     
                     int got_packet = 0;
+                    av_log(ffp, AV_LOG_DEBUG, "Encoding audio frame, pts=%"PRId64, resampled_frame->pts);
                     ret = avcodec_encode_audio2(ffp->audio_enc_ctx, &enc_pkt, resampled_frame, &got_packet);
                     
                     av_frame_free(&frame);
                     av_frame_free(&resampled_frame);
                     
                     if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error encoding audio frame: %s", av_err2str(ret));
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return ret;
                     }
                     
                     if (got_packet) {
+                        av_log(ffp, AV_LOG_DEBUG, "Got encoded audio packet, size=%d, pts=%"PRId64, 
+                               enc_pkt.size, enc_pkt.pts);
+                        
                         // 设置流索引
                         enc_pkt.stream_index = ffp->out_audio_stream_index;
                         
                         // 转换时间戳
+                        av_log(ffp, AV_LOG_DEBUG, "Rescaling audio timestamps, before: pts=%"PRId64", dts=%"PRId64,
+                               enc_pkt.pts, enc_pkt.dts);
+                               
                         enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
                                                      ffp->audio_enc_ctx->time_base,
                                                      ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
@@ -5491,19 +5562,41 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                                                       ffp->audio_enc_ctx->time_base,
                                                       ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base);
                         
+                        av_log(ffp, AV_LOG_DEBUG, "Rescaled audio timestamps, after: pts=%"PRId64", dts=%"PRId64,
+                               enc_pkt.pts, enc_pkt.dts);
+                        
                         // 写入文件
+                        av_log(ffp, AV_LOG_DEBUG, "Writing audio packet to file, size=%d", enc_pkt.size);
                         ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
                         if (ret < 0) {
-                            av_log(ffp, AV_LOG_ERROR, "Error writing audio frame\n");
+                            av_log(ffp, AV_LOG_ERROR, "Error writing audio frame: %s", av_err2str(ret));
+                        } else {
+                            av_log(ffp, AV_LOG_DEBUG, "Successfully wrote audio packet");
                         }
                         
                         av_packet_unref(&enc_pkt);
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "No packet produced from audio encoding");
                     }
+                } else {
+                    av_log(ffp, AV_LOG_DEBUG, "No frame decoded from audio packet");
+                    av_frame_free(&frame);
                 }
+            } else {
+                av_log(ffp, AV_LOG_DEBUG, "Skipping packet from stream %d (not video or audio)", packet->stream_index);
             }
         } else {
             // 原有的不需要转码的逻辑
+            av_log(ffp, AV_LOG_DEBUG, "Processing packet without transcoding, stream_index=%d, size=%d", 
+                   packet->stream_index, packet->size);
+                   
             AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
+            if (!pkt) {
+                av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet");
+                pthread_mutex_unlock(&ffp->record_mutex);
+                return AVERROR(ENOMEM);
+            }
+            
             av_new_packet(pkt, 0);
             if (0 == av_packet_ref(pkt, packet)) {
                 in_stream  = is->ic->streams[pkt->stream_index];
@@ -5515,6 +5608,9 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 // 检查是否有音频流
                 int has_audio = (is->audio_stream >= 0);
                 
+                av_log(ffp, AV_LOG_DEBUG, "Original packet: pts=%"PRId64", dts=%"PRId64", is_video=%d, has_audio=%d",
+                       pkt->pts, pkt->dts, is_video, has_audio);
+                
                 if (!ffp->is_first) { 
                     // 录制的第一帧，时间从0开始
                     ffp->is_first = 1;
@@ -5522,6 +5618,8 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     ffp->start_dts = pkt->dts;
                     pkt->pts = 0;
                     pkt->dts = 0;
+                    av_log(ffp, AV_LOG_DEBUG, "First packet, start_pts=%"PRId64", start_dts=%"PRId64,
+                           ffp->start_pts, ffp->start_dts);
                 } else {
                     if (has_audio) {
                         // 有音频流时，按照正常视频速度录制
@@ -5542,22 +5640,30 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
 
                 // 转换PTS/DTS
+                av_log(ffp, AV_LOG_DEBUG, "Rescaling timestamps, before: pts=%"PRId64", dts=%"PRId64,
+                       pkt->pts, pkt->dts);
+                       
                 pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
                 pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
                 pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
 
                 pkt->pos = -1;
 
-                av_log(ffp, AV_LOG_DEBUG, "inner pkt->pts:%"PRId64", pkt->dts:%"PRId64", pkt->duration:%"PRId64", is_video:%d, has_audio:%d", 
+                av_log(ffp, AV_LOG_DEBUG, "Rescaled packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
                        pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
 
                 // 写入一个AVPacket到输出文件
+                av_log(ffp, AV_LOG_DEBUG, "Writing packet to file, size=%d", pkt->size);
                 if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
-                    av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
+                    av_log(ffp, AV_LOG_ERROR, "Error muxing packet: %s", av_err2str(ret));
+                } else {
+                    av_log(ffp, AV_LOG_DEBUG, "Successfully wrote packet");
                 }
                 av_packet_unref(pkt);
+                av_free(pkt);
             } else {
-                av_log(ffp, AV_LOG_ERROR, "av_packet_ref == NULL");
+                av_log(ffp, AV_LOG_ERROR, "Failed to reference packet");
+                av_free(pkt);
             }
         }
         
@@ -5659,6 +5765,8 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     VideoState *is = ffp->is;
     int ret = 0, i;
     
+    av_log(ffp, AV_LOG_INFO, "Starting transcode recording to file: %s", file_name);
+    
     ffp->m_ofmt_ctx = NULL;
     ffp->m_ofmt = NULL;
     ffp->is_record = 0;
@@ -5671,94 +5779,118 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->tmp_frame = NULL;
     ffp->out_video_stream_index = -1;
     ffp->out_audio_stream_index = -1;
+    ffp->is_first = 0;
     
     if (!file_name || !strlen(file_name)) {
-        av_log(ffp, AV_LOG_ERROR, "filename is invalid");
+        av_log(ffp, AV_LOG_ERROR, "Invalid filename provided");
         goto end;
     }
     
     if (!is || !is->ic || is->paused || is->abort_request) {
-        av_log(ffp, AV_LOG_ERROR, "is, is->ic, is->paused is invalid");
+        av_log(ffp, AV_LOG_ERROR, "Invalid player state: is=%p, ic=%p, paused=%d, abort=%d", 
+               is, is ? is->ic : NULL, is ? is->paused : -1, is ? is->abort_request : -1);
         goto end;
     }
     
     if (ffp->is_record) {
-        av_log(ffp, AV_LOG_ERROR, "recording has started");
+        av_log(ffp, AV_LOG_ERROR, "Recording has already started");
         goto end;
     }
     
     // 初始化一个用于输出的AVFormatContext结构体
-    avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, "mp4", file_name);
+    av_log(ffp, AV_LOG_DEBUG, "Allocating output context for MP4 format");
+    ret = avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, "mp4", file_name);
     if (!ffp->m_ofmt_ctx) {
-        av_log(ffp, AV_LOG_ERROR, "Could not create output context filename is %s\n", file_name);
+        av_log(ffp, AV_LOG_ERROR, "Could not create output context for file '%s': %s", 
+               file_name, av_err2str(ret));
         goto end;
     }
     ffp->m_ofmt = ffp->m_ofmt_ctx->oformat;
+    av_log(ffp, AV_LOG_DEBUG, "Output format: %s", ffp->m_ofmt->name);
     
     // 创建输出流
+    av_log(ffp, AV_LOG_DEBUG, "Creating output streams, input has %d streams", is->ic->nb_streams);
     for (i = 0; i < is->ic->nb_streams; i++) {
         AVStream *in_stream = is->ic->streams[i];
         AVCodecContext *dec_ctx = NULL;
         
         if (i == is->video_stream) {
+            av_log(ffp, AV_LOG_DEBUG, "Processing video stream (index %d)", i);
             dec_ctx = is->viddec.avctx;
             if (!dec_ctx) {
-                av_log(ffp, AV_LOG_ERROR, "No video decoder context\n");
+                av_log(ffp, AV_LOG_ERROR, "No video decoder context available");
                 continue;
             }
             
+            av_log(ffp, AV_LOG_DEBUG, "Video decoder: %dx%d, format=%d, codec=%d", 
+                   dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt, dec_ctx->codec_id);
+            
             AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, NULL);
             if (!out_stream) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to allocate output video stream\n");
+                av_log(ffp, AV_LOG_ERROR, "Failed to allocate output video stream");
                 goto end;
             }
             
+            av_log(ffp, AV_LOG_DEBUG, "Initializing video transcoder");
             ret = init_transcoder(ffp, dec_ctx, out_stream, AVMEDIA_TYPE_VIDEO);
             if (ret < 0) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to initialize video transcoder\n");
+                av_log(ffp, AV_LOG_ERROR, "Failed to initialize video transcoder: %s", av_err2str(ret));
                 goto end;
             }
             
             ffp->out_video_stream_index = out_stream->index;
+            av_log(ffp, AV_LOG_DEBUG, "Video output stream index: %d", ffp->out_video_stream_index);
             
             // 创建视频格式转换上下文
+            av_log(ffp, AV_LOG_DEBUG, "Creating video format converter (swscale)");
             ffp->sws_ctx = sws_getContext(
                 dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt,
                 dec_ctx->width, dec_ctx->height, AV_PIX_FMT_YUV420P,
                 SWS_BICUBIC, NULL, NULL, NULL);
             if (!ffp->sws_ctx) {
-                av_log(ffp, AV_LOG_ERROR, "Could not initialize the conversion context\n");
+                av_log(ffp, AV_LOG_ERROR, "Could not initialize the video conversion context");
                 goto end;
             }
             
         } else if (i == is->audio_stream) {
+            av_log(ffp, AV_LOG_DEBUG, "Processing audio stream (index %d)", i);
             dec_ctx = is->auddec.avctx;
             if (!dec_ctx) {
-                av_log(ffp, AV_LOG_ERROR, "No audio decoder context\n");
+                av_log(ffp, AV_LOG_ERROR, "No audio decoder context available");
                 continue;
             }
             
+            av_log(ffp, AV_LOG_DEBUG, "Audio decoder: channels=%d, rate=%d, format=%d, codec=%d", 
+                   dec_ctx->channels, dec_ctx->sample_rate, dec_ctx->sample_fmt, dec_ctx->codec_id);
+            
             AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, NULL);
             if (!out_stream) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to allocate output audio stream\n");
+                av_log(ffp, AV_LOG_ERROR, "Failed to allocate output audio stream");
                 goto end;
             }
             
+            av_log(ffp, AV_LOG_DEBUG, "Initializing audio transcoder");
             ret = init_transcoder(ffp, dec_ctx, out_stream, AVMEDIA_TYPE_AUDIO);
             if (ret < 0) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to initialize audio transcoder\n");
+                av_log(ffp, AV_LOG_ERROR, "Failed to initialize audio transcoder: %s", av_err2str(ret));
                 goto end;
             }
             
             ffp->out_audio_stream_index = out_stream->index;
+            av_log(ffp, AV_LOG_DEBUG, "Audio output stream index: %d", ffp->out_audio_stream_index);
             
             // 创建音频格式转换上下文
+            av_log(ffp, AV_LOG_DEBUG, "Creating audio resampler (swresample)");
             ffp->swr_ctx_record = swr_alloc();
             if (!ffp->swr_ctx_record) {
-                av_log(ffp, AV_LOG_ERROR, "Could not allocate resampler context\n");
+                av_log(ffp, AV_LOG_ERROR, "Could not allocate audio resampler context");
                 goto end;
             }
             
+            av_log(ffp, AV_LOG_DEBUG, "Configuring audio resampler: in=%d ch, %d Hz, %d fmt -> out=%d ch, %d Hz, %d fmt",
+                   dec_ctx->channels, dec_ctx->sample_rate, dec_ctx->sample_fmt,
+                   ffp->audio_enc_ctx->channels, ffp->audio_enc_ctx->sample_rate, ffp->audio_enc_ctx->sample_fmt);
+                   
             av_opt_set_int(ffp->swr_ctx_record, "in_channel_count", dec_ctx->channels, 0);
             av_opt_set_int(ffp->swr_ctx_record, "in_sample_rate", dec_ctx->sample_rate, 0);
             av_opt_set_sample_fmt(ffp->swr_ctx_record, "in_sample_fmt", dec_ctx->sample_fmt, 0);
@@ -5767,17 +5899,25 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             av_opt_set_int(ffp->swr_ctx_record, "out_sample_rate", ffp->audio_enc_ctx->sample_rate, 0);
             av_opt_set_sample_fmt(ffp->swr_ctx_record, "out_sample_fmt", ffp->audio_enc_ctx->sample_fmt, 0);
             
-            if ((ret = swr_init(ffp->swr_ctx_record)) < 0) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to initialize the resampling context\n");
+            ret = swr_init(ffp->swr_ctx_record);
+            if (ret < 0) {
+                av_log(ffp, AV_LOG_ERROR, "Failed to initialize the audio resampling context: %s", av_err2str(ret));
                 goto end;
             }
         }
     }
     
+    // 检查是否有视频或音频流
+    if (ffp->out_video_stream_index < 0 && ffp->out_audio_stream_index < 0) {
+        av_log(ffp, AV_LOG_ERROR, "No video or audio streams available for recording");
+        goto end;
+    }
+    
     // 分配临时帧
+    av_log(ffp, AV_LOG_DEBUG, "Allocating temporary frame for video conversion");
     ffp->tmp_frame = av_frame_alloc();
     if (!ffp->tmp_frame) {
-        av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame\n");
+        av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
         goto end;
     }
     
@@ -5785,20 +5925,23 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     
     // 打开输出文件
     if (!(ffp->m_ofmt->flags & AVFMT_NOFILE)) {
+        av_log(ffp, AV_LOG_DEBUG, "Opening output file: %s", file_name);
         ret = avio_open(&ffp->m_ofmt_ctx->pb, file_name, AVIO_FLAG_WRITE);
         if (ret < 0) {
-            av_log(ffp, AV_LOG_ERROR, "Could not open output file '%s'\n", file_name);
+            av_log(ffp, AV_LOG_ERROR, "Could not open output file '%s': %s", file_name, av_err2str(ret));
             goto end;
         }
     }
     
     // 写视频文件头
+    av_log(ffp, AV_LOG_DEBUG, "Writing file header");
     ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
     if (ret < 0) {
-        av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file\n");
+        av_log(ffp, AV_LOG_ERROR, "Error writing file header: %s", av_err2str(ret));
         goto end;
     }
     
+    av_log(ffp, AV_LOG_INFO, "Transcode recording started successfully");
     ffp->is_record = 1;
     ffp->record_error = 0;
     pthread_mutex_init(&ffp->record_mutex, NULL);
@@ -5806,6 +5949,8 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     return 0;
     
 end:
+    av_log(ffp, AV_LOG_ERROR, "Failed to start transcode recording, cleaning up resources");
+    
     if (ffp->video_enc_ctx) {
         avcodec_free_context(&ffp->video_enc_ctx);
         ffp->video_enc_ctx = NULL;
