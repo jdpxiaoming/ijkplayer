@@ -19,6 +19,7 @@ package tv.danmaku.ijk.media.example.fragments;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.support.annotation.Nullable;
 import android.support.v4.app.Fragment;
@@ -31,11 +32,15 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import tv.danmaku.ijk.media.example.R;
+import tv.danmaku.ijk.media.example.activities.RecordSampleActivity;
 import tv.danmaku.ijk.media.example.activities.VideoActivity;
 
 public class SampleMediaListFragment extends Fragment {
     private ListView mFileListView;
     private SampleMediaAdapter mAdapter;
+    
+    // 特殊标记，用来标识录制示例
+    private static final String SAMPLE_RECORD_TAG = "[RECORD SAMPLE]";
 
     public static SampleMediaListFragment newInstance() {
         SampleMediaListFragment f = new SampleMediaListFragment();
@@ -64,10 +69,22 @@ public class SampleMediaListFragment extends Fragment {
                 SampleMediaItem item = mAdapter.getItem(position);
                 String name = item.mName;
                 String url = item.mUrl;
-                VideoActivity.intentTo(activity, url, name);
+                
+                // 如果是录制示例，启动RecordSampleActivity
+                if (name != null && name.startsWith(SAMPLE_RECORD_TAG)) {
+                    Intent intent = new Intent(activity, RecordSampleActivity.class);
+                    activity.startActivity(intent);
+                } else {
+                    // 否则正常启动VideoActivity
+                    VideoActivity.intentTo(activity, url, name);
+                }
             }
         });
 
+        // 添加录制示例入口，使用特殊标记
+        mAdapter.addItem("rtmp://your_rtmp_stream_url", SAMPLE_RECORD_TAG + " 直播录制示例");
+        
+        // 添加常规示例
         mAdapter.addItem("http://devimages.apple.com.edgekey.net/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8", "bipbop basic master playlist");
         mAdapter.addItem("http://devimages.apple.com.edgekey.net/streaming/examples/bipbop_4x3/gear1/prog_index.m3u8", "bipbop basic 400x300 @ 232 kbps");
         mAdapter.addItem("http://devimages.apple.com.edgekey.net/streaming/examples/bipbop_4x3/gear2/prog_index.m3u8", "bipbop basic 640x480 @ 650 kbps");

@@ -709,9 +709,13 @@ public final class IjkMediaPlayer extends AbstractMediaPlayer {
     @Override
     public void reset() {
         stayAwake(false);
+        updateSurfaceScreenOn();
+        resetListeners();
         _reset();
         // make sure none of the listeners get called anymore
-        mEventHandler.removeCallbacksAndMessages(null);
+        if (mEventHandler != null) {
+            mEventHandler.removeCallbacksAndMessages(null);
+        }
 
         mVideoWidth = 0;
         mVideoHeight = 0;
@@ -1284,4 +1288,18 @@ public final class IjkMediaPlayer extends AbstractMediaPlayer {
     public static native void native_profileBegin(String libName);
     public static native void native_profileEnd();
     public static native void native_setLogLevel(int level);
+
+    // 添加开始录制功能
+    public int startRecord(String filePath) {
+        return _startRecord(filePath);
+    }
+
+    private native int _startRecord(String filePath);
+
+    // 添加停止录制功能
+    public int stopRecord() {
+        return _stopRecord();
+    }
+
+    private native int _stopRecord();
 }
