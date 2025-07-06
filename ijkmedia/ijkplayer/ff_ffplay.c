@@ -5298,6 +5298,34 @@ int ffp_stop_record(FFPlayer *ffp)
         
         // 写入文件尾并关闭文件
         if (ffp->m_ofmt_ctx != NULL) {
+            // 对于只有视频的流，确保至少有一些数据写入
+            if (ffp->video_only && !ffp->is_first) {
+                av_log(ffp, AV_LOG_WARNING, "Video-only recording without any frames, trying to write minimal valid file");
+                
+                // 尝试写入一个空的视频帧，以确保文件有效
+                if (ffp->out_video_stream_index >= 0) {
+                    AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                    
+                    AVPacket pkt;
+                    av_init_packet(&pkt);
+                    pkt.data = NULL;
+                    pkt.size = 0;
+                    pkt.stream_index = ffp->out_video_stream_index;
+                    pkt.pts = 0;
+                    pkt.dts = 0;
+                    pkt.duration = 0;
+                    pkt.flags = AV_PKT_FLAG_KEY;
+                    
+                    int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &pkt);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error writing empty frame: %s", av_err2str(ret));
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "Successfully wrote empty frame");
+                        ffp->is_first = 1;  // 标记为已写入数据
+                    }
+                }
+            }
+            
             int ret = av_write_trailer(ffp->m_ofmt_ctx);
             if (ret < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Error writing trailer: %s", av_err2str(ret));
@@ -5557,6 +5585,63 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     if (decode_failed_count > 30 && !ffp->is_first) {
                         av_log(ffp, AV_LOG_WARNING, "Failed to decode frames after multiple attempts, but continuing to try");
                         // 不返回错误，继续尝试解码
+                    }
+                    
+                    // 对于只有视频的流，如果解码失败，直接写入原始包
+                    // 这样可以确保至少有数据写入文件
+                    if (ffp->video_only && decode_failed_count > 10) {
+                        av_log(ffp, AV_LOG_INFO, "Video-only mode: Writing original packet directly");
+                        
+                        AVPacket *pkt_copy = (AVPacket *)av_malloc(sizeof(AVPacket));
+                        if (!pkt_copy) {
+                            av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet for direct writing");
+                            return AVERROR(ENOMEM);
+                        }
+                        
+                        av_new_packet(pkt_copy, 0);
+                        if (0 == av_packet_ref(pkt_copy, packet)) {
+                            // 设置流索引
+                            pkt_copy->stream_index = ffp->out_video_stream_index;
+                            
+                            // 转换时间戳
+                            AVStream *in_stream = is->ic->streams[packet->stream_index];
+                            AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                            
+                            if (!ffp->is_first) {
+                                ffp->is_first = 1;
+                                ffp->start_pts = pkt_copy->pts;
+                                ffp->start_dts = pkt_copy->dts;
+                                pkt_copy->pts = 0;
+                                pkt_copy->dts = 0;
+                            } else {
+                                pkt_copy->pts = abs(pkt_copy->pts - ffp->start_pts);
+                                pkt_copy->dts = abs(pkt_copy->dts - ffp->start_dts);
+                            }
+                            
+                            pkt_copy->pts = av_rescale_q_rnd(pkt_copy->pts, 
+                                                          in_stream->time_base, 
+                                                          out_stream->time_base, 
+                                                          AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                            pkt_copy->dts = av_rescale_q_rnd(pkt_copy->dts, 
+                                                          in_stream->time_base, 
+                                                          out_stream->time_base, 
+                                                          AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                            pkt_copy->duration = av_rescale_q(pkt_copy->duration, 
+                                                           in_stream->time_base, 
+                                                           out_stream->time_base);
+                            pkt_copy->pos = -1;
+                            
+                            // 写入文件
+                            int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt_copy);
+                            if (ret < 0) {
+                                av_log(ffp, AV_LOG_ERROR, "Error writing direct packet: %s", av_err2str(ret));
+                            } else {
+                                av_log(ffp, AV_LOG_DEBUG, "Successfully wrote direct packet, size=%d", pkt_copy->size);
+                            }
+                        }
+                        
+                        av_packet_unref(pkt_copy);
+                        av_free(pkt_copy);
                     }
                 }
             } else if (packet->stream_index == is->audio_stream && ffp->out_audio_stream_index >= 0) {
@@ -5860,6 +5945,20 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         av_dict_set(&opts, "tune", "zerolatency", 0);  // 零延迟调优
         av_dict_set(&opts, "profile", "baseline", 0);  // 基准配置文件，兼容性最好
         
+        // 对于只有视频的流，使用更保守的设置
+        if (ffp->video_only) {
+            av_log(ffp, AV_LOG_INFO, "Using optimized settings for video-only stream");
+            // 降低比特率，避免过大文件
+            enc_ctx->bit_rate = 1500000;  // 1.5Mbps
+            // 设置更小的GOP，增加关键帧频率
+            enc_ctx->gop_size = (int)(enc_ctx->framerate.num / enc_ctx->framerate.den);  // 约1秒一个关键帧
+            // 设置更低的编码复杂度
+            av_dict_set(&opts, "preset", "ultrafast", 0);  // 最快速预设
+            // 设置CBR模式
+            av_dict_set(&opts, "crf", "23", 0);  // 固定质量因子
+            av_dict_set(&opts, "forced-idr", "1", 0);  // 强制IDR帧
+        }
+        
         ffp->video_enc_ctx = enc_ctx;
     } else if (type == AVMEDIA_TYPE_AUDIO) {
         encoder = avcodec_find_encoder(AV_CODEC_ID_AAC);
@@ -6109,6 +6208,12 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         goto end;
     }
     
+    // 记录是否只有视频流
+    ffp->video_only = (ffp->out_video_stream_index >= 0 && ffp->out_audio_stream_index < 0);
+    if (ffp->video_only) {
+        av_log(ffp, AV_LOG_INFO, "Video-only stream detected (no audio), configuring for video-only recording");
+    }
+    
     // 分配临时帧
     av_log(ffp, AV_LOG_DEBUG, "Allocating temporary frame for video conversion");
     ffp->tmp_frame = av_frame_alloc();
@@ -6171,6 +6276,28 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     // 设置最小录制时间（毫秒），防止录制过早停止
     ffp->min_record_time = 5000;  // 至少录制5秒
     ffp->record_start_time = av_gettime() / 1000;  // 当前时间（毫秒）
+    
+    // 对于只有视频的流，进行特殊处理
+    if (ffp->video_only) {
+        av_log(ffp, AV_LOG_INFO, "Configuring special parameters for video-only recording");
+        
+        // 设置更高的容错性
+        ffp->m_ofmt_ctx->flags |= AVFMT_FLAG_GENPTS;  // 生成PTS
+        ffp->m_ofmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;  // 不缓冲
+        
+        // 设置MP4特定参数
+        if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+            av_log(ffp, AV_LOG_INFO, "Setting MP4-specific parameters for video-only stream");
+            av_dict_set(&ffp->m_ofmt_ctx->metadata, "encoder", "IJKPlayer", 0);
+            av_dict_set(&ffp->m_ofmt_ctx->metadata, "creation_time", "now", 0);
+            
+            // 确保视频流有正确的时间基准
+            if (ffp->out_video_stream_index >= 0) {
+                AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                out_stream->time_base = (AVRational){1, 90000};  // 标准MP4时间基准
+            }
+        }
+    }
     
     pthread_mutex_init(&ffp->record_mutex, NULL);
     

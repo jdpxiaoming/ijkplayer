@@ -602,6 +602,7 @@ typedef struct FFPlayer {
     int64_t start_dts;                  // 开始录制时dts
     int64_t min_record_time;            // 最小录制时间(毫秒)
     int64_t record_start_time;          // 录制开始时间(毫秒)
+    int video_only;                     // 是否只有视频流(无音频)
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
