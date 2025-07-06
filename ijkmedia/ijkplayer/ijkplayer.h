@@ -86,7 +86,7 @@ struct SDL_Vout;
 
 /*-
  * ijkmp_seek_to()          -> self
- * ijkmp_start()            -> self
+ * ijkmp_start()            -> MP_STATE_STARTED
  * ijkmp_pause()            -> MP_STATE_PAUSED
  * ijkmp_stop()             -> MP_STATE_STOPPED
  *                   ...    -> MP_STATE_COMPLETED
@@ -217,5 +217,9 @@ void           *ijkmp_set_weak_thiz(IjkMediaPlayer *mp, void *weak_thiz);
 /* need to call msg_free_res for freeing the resouce obtained in msg */
 int             ijkmp_get_msg(IjkMediaPlayer *mp, AVMessage *msg, int block);
 void            ijkmp_set_frame_at_time(IjkMediaPlayer *mp, const char *path, int64_t start_time, int64_t end_time, int num, int definition);
+
+int ijkmp_start_record(IjkMediaPlayer* mp, const char* file_name);
+int ijkmp_stop_record(IjkMediaPlayer* mp);
+int ijkmp_start_record_transcode(IjkMediaPlayer* mp, const char* file_name);
 
 #endif

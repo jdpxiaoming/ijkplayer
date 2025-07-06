@@ -587,6 +587,16 @@ typedef struct FFPlayer {
     int is_record;                      // 是否在录制
     int record_error;
 
+    // 转码相关变量
+    int need_transcode;                 // 是否需要转码
+    AVCodecContext *video_enc_ctx;      // 视频编码器上下文
+    AVCodecContext *audio_enc_ctx;      // 音频编码器上下文
+    AVFrame *tmp_frame;                 // 临时帧
+    struct SwsContext *sws_ctx;         // 视频格式转换上下文
+    struct SwrContext *swr_ctx_record;  // 音频格式转换上下文(录制用)
+    int out_video_stream_index;         // 输出视频流索引
+    int out_audio_stream_index;         // 输出音频流索引
+
     int is_first;                       // 第一帧数据
     int64_t start_pts;                  // 开始录制时pts
     int64_t start_dts;                  // 开始录制时dts

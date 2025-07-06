@@ -1296,6 +1296,13 @@ public final class IjkMediaPlayer extends AbstractMediaPlayer {
 
     private native int _startRecord(String filePath);
 
+    // 添加开始录制并转码功能
+    public int startRecordTranscode(String filePath) {
+        return _startRecordTranscode(filePath);
+    }
+    
+    private native int _startRecordTranscode(String filePath);
+
     // 添加停止录制功能
     public int stopRecord() {
         return _stopRecord();

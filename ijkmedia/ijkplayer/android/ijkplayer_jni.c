@@ -628,7 +628,7 @@ IjkMediaPlayer_getCurrentFrame(JNIEnv *env, jobject thiz, jobject bitmap)
     return retval;
 }
 
-//录播视频. 
+//录制视频.
 static jint
 IjkMediaPlayer_startRecord(JNIEnv *env, jobject thiz,jstring file)
 {
@@ -637,6 +637,23 @@ IjkMediaPlayer_startRecord(JNIEnv *env, jobject thiz,jstring file)
     JNI_CHECK_GOTO(mp, env, NULL, "mpjni: startRecord: null mp", LABEL_RETURN);
     const char *nativeString = (*env)->GetStringUTFChars(env, file, 0);
     retval = ijkmp_start_record(mp,nativeString);
+    (*env)->ReleaseStringUTFChars(env, file, nativeString);
+
+LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+//录制视频并转码为MP4. 
+static jint
+IjkMediaPlayer_startRecordTranscode(JNIEnv *env, jobject thiz,jstring file)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: startRecordTranscode: null mp", LABEL_RETURN);
+    const char *nativeString = (*env)->GetStringUTFChars(env, file, 0);
+    retval = ijkmp_start_record_transcode(mp, nativeString);
+    (*env)->ReleaseStringUTFChars(env, file, nativeString);
 
 LABEL_RETURN:
     ijkmp_dec_ref_p(&mp);
@@ -1245,6 +1262,7 @@ static JNINativeMethod g_methods[] = {
     { "_setOption",             "(ILjava/lang/String;J)V",                  (void *) IjkMediaPlayer_setOptionLong },
     { "_setZeroDelay",          "(I)V",     (void *) IjkMediaPlayer_setZeroDelay},//设置0延迟开关. 
     { "_startRecord",            "(Ljava/lang/String;)I",      (void *) IjkMediaPlayer_startRecord },
+    { "_startRecordTranscode",   "(Ljava/lang/String;)I",      (void *) IjkMediaPlayer_startRecordTranscode },
     { "_stopRecord",             "()I",      (void *) IjkMediaPlayer_stopRecord },
     { "_getCurrentFrame",        "(Landroid/graphics/Bitmap;)Z",      (void *) IjkMediaPlayer_getCurrentFrame },
 

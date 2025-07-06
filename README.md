@@ -288,6 +288,7 @@ But ijkplayer is also based on other different projects under various licenses, 
 
 - 支持将正在播放的直播流录制为MP4文件
 - 提供简单的Java API接口：`startRecord`和`stopRecord`
+- 支持转码录制功能：`startRecordTranscode`，可以将任何格式的视频源（如RTSP）转码为MP4
 - 包含示例Activity展示如何使用录制功能
 - 在播放直播的同时进行录制，不影响视频播放体验
 
@@ -297,15 +298,22 @@ But ijkplayer is also based on other different projects under various licenses, 
 
 1. 在`ff_ffplay.h`和`ff_ffplay.c`中添加了录制相关函数：
    - `ffp_start_record`: 开始录制
+   - `ffp_start_record_transcode`: 开始转码录制
    - `ffp_stop_record`: 停止录制
    - `ffp_record_file`: 将视频数据包写入MP4文件
 
 2. 在`read_thread`函数中添加了录制处理逻辑，当`ffp->is_record`为true时，将接收到的数据包写入MP4文件。
 
+3. 转码功能实现：
+   - 使用FFmpeg的编解码API将原始格式转换为H.264/AAC编码
+   - 支持视频格式转换和音频重采样
+   - 自动处理时间戳，确保录制的视频可以正常播放
+
 ### JNI层实现
 
 1. 在`ijkplayer_jni.c`中实现了JNI接口：
    - `IjkMediaPlayer_startRecord`: 调用`ijkmp_start_record`开始录制
+   - `IjkMediaPlayer_startRecordTranscode`: 调用`ijkmp_start_record_transcode`开始转码录制
    - `IjkMediaPlayer_stopRecord`: 调用`ijkmp_stop_record`停止录制
 
 2. 在JNI注册表中注册了以上接口，使Java层可以调用它们。
@@ -314,45 +322,57 @@ But ijkplayer is also based on other different projects under various licenses, 
 
 1. 在`IjkMediaPlayer.java`中添加了录制接口：
    - `startRecord(String filePath)`: 开始录制到指定路径
+   - `startRecordTranscode(String filePath)`: 开始转码录制到指定路径
    - `stopRecord()`: 停止录制
 
 2. 创建了示例Activity `RecordSampleActivity`，演示如何使用录制功能：
    - 提供按钮控制录制的开始和停止
+   - 支持选择直接录制或转码录制模式
    - 显示录制状态和保存路径
    - 处理生命周期事件，确保正确释放资源
 
 ## 使用方法
 
-### 基本用法
+### 直接录制（保留原始格式）
+
+适用于已经是MP4兼容格式的视频流（如H.264/AAC）：
 
 ```java
-// 假设已经初始化了IjkMediaPlayer并开始播放
-IjkMediaPlayer player = new IjkMediaPlayer();
-player.setDataSource(url);
-player.prepare();
-player.start();
-
-// 开始录制
-String recordPath = "/storage/emulated/0/Movies/record.mp4";
-int result = player.startRecord(recordPath);
-if (result == 0) {
-    // 录制开始成功
-} else {
-    // 录制开始失败
+IjkMediaPlayer player = mVideoView.getIjkMediaPlayer();
+if (player != null) {
+    // 开始录制
+    player.startRecord("/sdcard/record.mp4");
+    
+    // ... 播放一段时间后 ...
+    
+    // 停止录制
+    player.stopRecord();
 }
-
-// ... 播放过程中 ...
-
-// 停止录制
-player.stopRecord();
 ```
 
-### 注意事项
+### 转码录制（转换为MP4格式）
 
-1. 确保应用有写入外部存储的权限
-2. 录制会增加CPU和内存占用，可能影响播放性能
-3. 录制的文件可能会很大，请确保有足够的存储空间
-4. 直播录制时应考虑网络波动带来的影响
+适用于需要转换格式的视频流（如RTSP、RTMP等非MP4兼容格式）：
+
+```java
+IjkMediaPlayer player = mVideoView.getIjkMediaPlayer();
+if (player != null) {
+    // 开始转码录制，将任何格式转为MP4
+    player.startRecordTranscode("/sdcard/record.mp4");
+    
+    // ... 播放一段时间后 ...
+    
+    // 停止录制
+    player.stopRecord();
+}
+```
+
+## 注意事项
+
+1. 录制功能需要存储权限，请确保应用已获取相应权限
+2. 转码录制会消耗更多CPU资源，可能会影响低端设备的播放流畅度
+3. 录制的文件会保存在指定路径，请确保有足够的存储空间
+4. 对于没有音频的视频流，录制时会保持原始的视频播放速度
 
 ## 示例代码
 

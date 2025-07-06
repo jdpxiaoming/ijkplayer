@@ -470,7 +470,7 @@ int ijkmp_start(IjkMediaPlayer *mp)
     return retval;
 }
 
-//Â¼ÖÆÊÓÆµ add by poe 2024/07/27.
+//Â¼ï¿½ï¿½ï¿½ï¿½Æµ add by poe 2024/07/27.
 int ijkmp_start_record(IjkMediaPlayer *mp,const char *file_name)
 {
     assert(mp);
@@ -481,7 +481,7 @@ int ijkmp_start_record(IjkMediaPlayer *mp,const char *file_name)
     MPTRACE("ijkmp_startRecord()=%d\n", retval);
     return retval;
 }
-//½áÊøÂ¼²¢ÖÆ±£´æÊÓÆµ add by poe 2024/07/27.
+//ï¿½ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½Æ±ï¿½ï¿½ï¿½ï¿½ï¿½Æµ add by poe 2024/07/27.
 int ijkmp_stop_record(IjkMediaPlayer *mp)
 {
     assert(mp);
@@ -493,13 +493,13 @@ int ijkmp_stop_record(IjkMediaPlayer *mp)
     return retval;
 }
 
-//ÊµÏÖ½ØÍ¼º¯Êı add by poe 2024/07/27. 
+//Êµï¿½Ö½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ add by poe 2024/07/27. 
 static void ijkmp_get_current_frame_l(IjkMediaPlayer *mp, uint8_t *frame_buf)
 {
   ffp_get_current_frame_l(mp->ffplayer, frame_buf);
 }
 
-//ÊµÏÖ½ØÍ¼º¯Êı add by poe 2024/07/27. 
+//Êµï¿½Ö½ï¿½Í¼ï¿½ï¿½ï¿½ï¿½ add by poe 2024/07/27. 
 void ijkmp_get_current_frame(IjkMediaPlayer *mp, uint8_t *frame_buf)
 {
   assert(mp);
@@ -833,4 +833,14 @@ int ijkmp_get_msg(IjkMediaPlayer *mp, AVMessage *msg, int block)
     }
 
     return -1;
+}
+
+int ijkmp_start_record_transcode(IjkMediaPlayer* mp, const char* file_name)
+{
+    assert(mp);
+    MPTRACE("ijkmp_start_record_transcode()\n");
+    pthread_mutex_lock(&mp->mutex);
+    int retval = ffp_start_record_transcode(mp->ffplayer, file_name);
+    pthread_mutex_unlock(&mp->mutex);
+    return retval;
 }
