@@ -580,7 +580,12 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                 switch (d->avctx->codec_type) {
                     case AVMEDIA_TYPE_VIDEO:
                         ret = avcodec_receive_frame(d->avctx, frame);
-                        if (ret >= 0) {
+                        // Reset compat_decode_consumed if needed for HEVC (H.265)
+                        if (ret == AVERROR_INVALIDDATA && d->avctx->codec_id == AV_CODEC_ID_HEVC) {
+                            av_log(ffp, AV_LOG_WARNING, "Resetting HEVC decoder state to avoid assertion failure");
+                            avcodec_flush_buffers(d->avctx);
+                            ret = AVERROR(EAGAIN);
+                        } else if (ret >= 0) {
                             ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
                             if (ffp->decoder_reorder_pts == -1) {
                                 frame->pts = frame->best_effort_timestamp;
@@ -5580,17 +5585,29 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     av_log(ffp, AV_LOG_DEBUG, "No frame decoded from video packet (%d attempts)", decode_failed_count);
                     av_frame_free(&frame);
                     
-                    // 如果解码失败次数过多，但还没有成功解码过任何帧，则不要设置错误标志
+                    // 检查是否是HEVC视频，这种情况下可能会有解码问题
+                    int is_hevc = (is->viddec.avctx && is->viddec.avctx->codec_id == AV_CODEC_ID_HEVC);
+                    if (is_hevc) {
+                        av_log(ffp, AV_LOG_WARNING, "HEVC video detected, using special handling for decoder");
+                    }
+                    
+                    // 如果是HEVC或解码失败次数较多，但还没有成功解码过任何帧，则不要设置错误标志
                     // 这样可以让录制继续，直到成功解码出第一帧
-                    if (decode_failed_count > 30 && !ffp->is_first) {
+                    if ((is_hevc || decode_failed_count > 15) && !ffp->is_first) {
                         av_log(ffp, AV_LOG_WARNING, "Failed to decode frames after multiple attempts, but continuing to try");
                         // 不返回错误，继续尝试解码
                     }
                     
-                    // 对于只有视频的流，如果解码失败，直接写入原始包
+                    // 对于HEVC、RTSP/RTMP流或只有视频的流，如果解码失败，直接写入原始包
                     // 这样可以确保至少有数据写入文件
-                    if (ffp->video_only && decode_failed_count > 10) {
-                        av_log(ffp, AV_LOG_INFO, "Video-only mode: Writing original packet directly");
+                    int is_rtsp = (is->ic && is->ic->iformat && is->ic->iformat->name && 
+                                 (strstr(is->ic->iformat->name, "rtsp") || 
+                                  strstr(is->ic->url, "rtsp") ||
+                                  strstr(is->ic->url, "rtmp")));
+                    
+                    if ((ffp->video_only || is_hevc || is_rtsp) && decode_failed_count > 5) {
+                        av_log(ffp, AV_LOG_INFO, "Special stream mode (%s): Writing original packet directly", 
+                               is_hevc ? "HEVC" : (is_rtsp ? "RTSP/RTMP" : "video-only"));
                         
                         AVPacket *pkt_copy = (AVPacket *)av_malloc(sizeof(AVPacket));
                         if (!pkt_copy) {
@@ -5796,16 +5813,16 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
             // 原有的不需要转码的逻辑
             av_log(ffp, AV_LOG_DEBUG, "Processing packet without transcoding, stream_index=%d, size=%d", 
                    packet->stream_index, packet->size);
-                   
-            AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
+
+        AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
             if (!pkt) {
                 av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet");
                 pthread_mutex_unlock(&ffp->record_mutex);
                 return AVERROR(ENOMEM);
             }
             
-            av_new_packet(pkt, 0);
-            if (0 == av_packet_ref(pkt, packet)) {
+        av_new_packet(pkt, 0);
+        if (0 == av_packet_ref(pkt, packet)) {
                 in_stream  = is->ic->streams[pkt->stream_index];
                 out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
 
@@ -5814,17 +5831,17 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 
                 // 检查是否有音频流
                 int has_audio = (is->audio_stream >= 0);
-                
+
                 av_log(ffp, AV_LOG_DEBUG, "Original packet: pts=%"PRId64", dts=%"PRId64", is_video=%d, has_audio=%d",
                        pkt->pts, pkt->dts, is_video, has_audio);
                 
                 if (!ffp->is_first) { 
                     // 录制的第一帧，时间从0开始
-                    ffp->is_first = 1;
+                ffp->is_first = 1;
                     ffp->start_pts = pkt->pts;
                     ffp->start_dts = pkt->dts;
-                    pkt->pts = 0;
-                    pkt->dts = 0;
+                pkt->pts = 0;
+                pkt->dts = 0;
                     av_log(ffp, AV_LOG_DEBUG, "First packet, start_pts=%"PRId64", start_dts=%"PRId64,
                            ffp->start_pts, ffp->start_dts);
                 } else {
@@ -5841,32 +5858,32 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         // 不使用recordTs，使用原始时间戳
                     } else {
                         // 其他类型的流（如字幕等）
-                        pkt->pts = abs(pkt->pts - ffp->start_pts);
-                        pkt->dts = abs(pkt->dts - ffp->start_dts);
-                    }
+                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                pkt->dts = abs(pkt->dts - ffp->start_dts);
+            }
                 }
 
-                // 转换PTS/DTS
+            // 转换PTS/DTS
                 av_log(ffp, AV_LOG_DEBUG, "Rescaling timestamps, before: pts=%"PRId64", dts=%"PRId64,
                        pkt->pts, pkt->dts);
                        
-                pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-                pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-                pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+            pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
 
-                pkt->pos = -1;
+            pkt->pos = -1;
 
                 av_log(ffp, AV_LOG_DEBUG, "Rescaled packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
                        pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
 
-                // 写入一个AVPacket到输出文件
+            // 写入一个AVPacket到输出文件
                 av_log(ffp, AV_LOG_DEBUG, "Writing packet to file, size=%d", pkt->size);
-                if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
+            if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
                     av_log(ffp, AV_LOG_ERROR, "Error muxing packet: %s", av_err2str(ret));
                 } else {
                     av_log(ffp, AV_LOG_DEBUG, "Successfully wrote packet");
-                }
-                av_packet_unref(pkt);
+            }
+            av_packet_unref(pkt);
                 av_free(pkt);
             } else {
                 av_log(ffp, AV_LOG_ERROR, "Failed to reference packet");
@@ -5874,7 +5891,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
             }
         }
         
-        pthread_mutex_unlock(&ffp->record_mutex);
+            pthread_mutex_unlock(&ffp->record_mutex);
     }
     return ret;
 }
@@ -5940,23 +5957,47 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         // 设置线程数
         enc_ctx->thread_count = 4;
         
+        // 检查输入是否是HEVC
+        int is_hevc_input = (dec_ctx->codec_id == AV_CODEC_ID_HEVC);
+        
         // 设置编码器特定选项
-        av_dict_set(&opts, "preset", "superfast", 0);  // 超快速预设
+        av_dict_set(&opts, "preset", is_hevc_input ? "ultrafast" : "superfast", 0);  // 超快速预设，HEVC使用更快的设置
         av_dict_set(&opts, "tune", "zerolatency", 0);  // 零延迟调优
         av_dict_set(&opts, "profile", "baseline", 0);  // 基准配置文件，兼容性最好
         
-        // 对于只有视频的流，使用更保守的设置
-        if (ffp->video_only) {
-            av_log(ffp, AV_LOG_INFO, "Using optimized settings for video-only stream");
+        // 对于HEVC输入或只有视频的流，使用更保守的设置
+        if (is_hevc_input || ffp->video_only) {
+            av_log(ffp, AV_LOG_INFO, "Using optimized settings for %s stream", 
+                   is_hevc_input ? "HEVC" : "video-only");
+            
             // 降低比特率，避免过大文件
             enc_ctx->bit_rate = 1500000;  // 1.5Mbps
+            
             // 设置更小的GOP，增加关键帧频率
             enc_ctx->gop_size = (int)(enc_ctx->framerate.num / enc_ctx->framerate.den);  // 约1秒一个关键帧
+            
             // 设置更低的编码复杂度
             av_dict_set(&opts, "preset", "ultrafast", 0);  // 最快速预设
+            
             // 设置CBR模式
             av_dict_set(&opts, "crf", "23", 0);  // 固定质量因子
             av_dict_set(&opts, "forced-idr", "1", 0);  // 强制IDR帧
+            
+            // 对于HEVC输入，添加额外设置以确保兼容性
+            if (is_hevc_input) {
+                av_log(ffp, AV_LOG_INFO, "Adding HEVC-specific optimizations");
+                
+                // 确保使用一致的参考帧设置
+                enc_ctx->refs = 1;
+                enc_ctx->slices = 1;
+                
+                // 设置关键帧的最小间隔更小以确保更多关键帧
+                enc_ctx->keyint_min = enc_ctx->gop_size / 2;
+                
+                // 使用更简单的编码配置
+                av_dict_set(&opts, "profile", "main", 0);  // 主要配置文件，兼容性好一些
+                av_dict_set(&opts, "level", "4.0", 0);  // 限制级别以提高兼容性
+            }
         }
         
         ffp->video_enc_ctx = enc_ctx;
@@ -6019,7 +6060,7 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         av_log(ffp, AV_LOG_ERROR, "Cannot open %s encoder: %s", 
                type == AVMEDIA_TYPE_VIDEO ? "video" : "audio", av_err2str(ret));
         av_dict_free(&opts);
-        return ret;
+    return ret;
     }
     
     // 检查未使用的选项
@@ -6075,6 +6116,8 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->out_video_stream_index = -1;
     ffp->out_audio_stream_index = -1;
     ffp->is_first = 0;
+    ffp->min_record_time = 5000; // Minimum recording time of 5 seconds
+    ffp->record_start_time = av_gettime() / 1000; // Current time in milliseconds
     
     if (!file_name || !strlen(file_name)) {
         av_log(ffp, AV_LOG_ERROR, "Invalid filename provided");
