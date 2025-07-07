@@ -569,6 +569,53 @@ fail0:
 static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSubtitle *sub) {
     int ret = AVERROR(EAGAIN);
 
+    // Complete bypass for HEVC decoding when recording
+    if (ffp->is_record && d->avctx->codec_id == AV_CODEC_ID_HEVC && d->avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+        // For HEVC recording, we'll use a dummy frame approach
+        // This completely avoids the problematic decoder path
+        static int dummy_frame_count = 0;
+        
+        // Get a packet but don't decode it
+        AVPacket pkt;
+        if (packet_queue_get_or_buffering(ffp, d->queue, &pkt, &d->pkt_serial, &d->finished) < 0)
+            return -1;
+            
+        if (pkt.data == flush_pkt.data) {
+            avcodec_flush_buffers(d->avctx);
+            d->finished = 0;
+            av_packet_unref(&pkt);
+            return AVERROR(EAGAIN);
+        }
+        
+        // Create a dummy frame with the packet timestamp
+        if (frame) {
+            frame->pts = pkt.pts;
+            frame->pkt_dts = pkt.dts;
+            frame->pkt_pos = pkt.pos;
+            frame->pkt_duration = pkt.duration;
+            frame->width = d->avctx->width > 0 ? d->avctx->width : 1920;
+            frame->height = d->avctx->height > 0 ? d->avctx->height : 1080;
+            frame->format = AV_PIX_FMT_YUV420P;
+            
+            // Store the packet for direct writing in ffp_record_file
+            if (!ffp->hevc_packet_cache) {
+                ffp->hevc_packet_cache = av_mallocz(sizeof(AVPacket));
+                av_init_packet(ffp->hevc_packet_cache);
+            } else {
+                av_packet_unref(ffp->hevc_packet_cache);
+            }
+            
+            av_packet_ref(ffp->hevc_packet_cache, &pkt);
+        }
+        
+        av_packet_unref(&pkt);
+        dummy_frame_count++;
+        
+        // Return success to continue the recording pipeline
+        return 1;
+    }
+
+    // Normal decoding path for non-HEVC or when not recording
     for (;;) {
         AVPacket pkt;
 
@@ -581,20 +628,30 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                     case AVMEDIA_TYPE_VIDEO:
                         // Special handling for HEVC (H.265) to prevent assertion failures
                         if (d->avctx->codec_id == AV_CODEC_ID_HEVC) {
-                            // For HEVC, use a more careful approach to avoid assertion failures
-                            ret = avcodec_receive_frame(d->avctx, frame);
+                            // For HEVC, avoid using avcodec_receive_frame which causes the assertion
+                            // Instead, use the older API which doesn't have the issue
+                            AVPacket temp_pkt;
+                            av_init_packet(&temp_pkt);
+                            temp_pkt.data = NULL;
+                            temp_pkt.size = 0;
                             
-                            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+                            int got_frame = 0;
+                            ret = avcodec_decode_video2(d->avctx, frame, &got_frame, &temp_pkt);
+                            
+                            if (ret < 0) {
                                 av_log(ffp, AV_LOG_WARNING, "HEVC decoder error (%d), resetting decoder state", ret);
                                 avcodec_flush_buffers(d->avctx);
                                 ret = AVERROR(EAGAIN);
-                            } else if (ret >= 0) {
+                            } else if (got_frame) {
+                                ret = 0; // Success
                                 ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
                                 if (ffp->decoder_reorder_pts == -1) {
                                     frame->pts = frame->best_effort_timestamp;
                                 } else if (!ffp->decoder_reorder_pts) {
                                     frame->pts = frame->pkt_dts;
                                 }
+                            } else {
+                                ret = AVERROR(EAGAIN);
                             }
                         } else {
                             // Normal handling for non-HEVC codecs
@@ -5400,6 +5457,14 @@ int ffp_stop_record(FFPlayer *ffp)
             ffp->need_transcode = 0;
         }
         
+        // 清理HEVC包缓存
+        if (ffp->hevc_packet_cache) {
+            av_log(ffp, AV_LOG_DEBUG, "Cleaning up HEVC packet cache");
+            av_packet_unref(ffp->hevc_packet_cache);
+            av_freep(&ffp->hevc_packet_cache);
+            ffp->hevc_packet_cache = NULL;
+        }
+        
         ffp->is_first = 0;
         pthread_mutex_unlock(&ffp->record_mutex);
         pthread_mutex_destroy(&ffp->record_mutex);
@@ -5469,6 +5534,61 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 // 检查是否是HEVC视频，如果是，可以直接写入包而不尝试解码
                 int is_hevc = (is->viddec.avctx && is->viddec.avctx->codec_id == AV_CODEC_ID_HEVC);
                 
+                // 检查是否有缓存的HEVC包（来自我们的特殊HEVC处理路径）
+                if (is_hevc && ffp->hevc_packet_cache) {
+                    av_log(ffp, AV_LOG_DEBUG, "Using cached HEVC packet for direct writing");
+                    
+                    // 使用缓存的包
+                    AVPacket *pkt_copy = (AVPacket *)av_malloc(sizeof(AVPacket));
+                    if (!pkt_copy) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet for cached HEVC writing");
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(ENOMEM);
+                    }
+                    
+                    av_init_packet(pkt_copy);
+                    if (0 == av_packet_ref(pkt_copy, ffp->hevc_packet_cache)) {
+                        // 设置流索引
+                        pkt_copy->stream_index = ffp->out_video_stream_index;
+                        
+                        // 转换时间戳
+                        AVStream *in_stream = is->ic->streams[is->video_stream];
+                        AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                        
+                        if (!ffp->is_first) {
+                            ffp->is_first = 1;
+                            ffp->start_pts = pkt_copy->pts;
+                            ffp->start_dts = pkt_copy->dts;
+                            pkt_copy->pts = 0;
+                            pkt_copy->dts = 0;
+                        } else {
+                            if (pkt_copy->pts != AV_NOPTS_VALUE)
+                                pkt_copy->pts = av_rescale_q(pkt_copy->pts - ffp->start_pts,
+                                                           in_stream->time_base,
+                                                           out_stream->time_base);
+                            if (pkt_copy->dts != AV_NOPTS_VALUE)
+                                pkt_copy->dts = av_rescale_q(pkt_copy->dts - ffp->start_dts,
+                                                           in_stream->time_base,
+                                                           out_stream->time_base);
+                        }
+                        
+                        // 写入文件
+                        av_log(ffp, AV_LOG_DEBUG, "Writing cached HEVC packet, size=%d", pkt_copy->size);
+                        int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt_copy);
+                        if (ret < 0) {
+                            av_log(ffp, AV_LOG_ERROR, "Error writing cached HEVC frame: %s", av_err2str(ret));
+                        }
+                        
+                        av_packet_unref(pkt_copy);
+                        av_free(pkt_copy);
+                        
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    } else {
+                        av_free(pkt_copy);
+                    }
+                }
+                
                 // 对于HEVC视频，使用直接写入方式以避免解码问题
                 if (is_hevc && ffp->direct_hevc_write) {
                     av_log(ffp, AV_LOG_DEBUG, "Direct HEVC packet writing mode, bypassing decode/encode");
@@ -5480,7 +5600,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         return AVERROR(ENOMEM);
                     }
                     
-                    av_new_packet(pkt_copy, 0);
+                    av_init_packet(pkt_copy);
                     if (0 == av_packet_ref(pkt_copy, packet)) {
                         // 设置流索引
                         pkt_copy->stream_index = ffp->out_video_stream_index;
@@ -6191,6 +6311,7 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->min_record_time = 5000; // Minimum recording time of 5 seconds
     ffp->record_start_time = av_gettime() / 1000; // Current time in milliseconds
     ffp->direct_hevc_write = 1; // Enable direct HEVC packet writing by default
+    ffp->hevc_packet_cache = NULL; // Initialize HEVC packet cache to NULL
     
     if (!file_name || !strlen(file_name)) {
         av_log(ffp, AV_LOG_ERROR, "Invalid filename provided");
