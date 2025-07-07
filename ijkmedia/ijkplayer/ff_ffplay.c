@@ -579,18 +579,33 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
 
                 switch (d->avctx->codec_type) {
                     case AVMEDIA_TYPE_VIDEO:
-                        ret = avcodec_receive_frame(d->avctx, frame);
-                        // Reset compat_decode_consumed if needed for HEVC (H.265)
-                        if (ret == AVERROR_INVALIDDATA && d->avctx->codec_id == AV_CODEC_ID_HEVC) {
-                            av_log(ffp, AV_LOG_WARNING, "Resetting HEVC decoder state to avoid assertion failure");
-                            avcodec_flush_buffers(d->avctx);
-                            ret = AVERROR(EAGAIN);
-                        } else if (ret >= 0) {
-                            ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
-                            if (ffp->decoder_reorder_pts == -1) {
-                                frame->pts = frame->best_effort_timestamp;
-                            } else if (!ffp->decoder_reorder_pts) {
-                                frame->pts = frame->pkt_dts;
+                        // Special handling for HEVC (H.265) to prevent assertion failures
+                        if (d->avctx->codec_id == AV_CODEC_ID_HEVC) {
+                            // For HEVC, use a more careful approach to avoid assertion failures
+                            ret = avcodec_receive_frame(d->avctx, frame);
+                            
+                            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+                                av_log(ffp, AV_LOG_WARNING, "HEVC decoder error (%d), resetting decoder state", ret);
+                                avcodec_flush_buffers(d->avctx);
+                                ret = AVERROR(EAGAIN);
+                            } else if (ret >= 0) {
+                                ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
+                                if (ffp->decoder_reorder_pts == -1) {
+                                    frame->pts = frame->best_effort_timestamp;
+                                } else if (!ffp->decoder_reorder_pts) {
+                                    frame->pts = frame->pkt_dts;
+                                }
+                            }
+                        } else {
+                            // Normal handling for non-HEVC codecs
+                            ret = avcodec_receive_frame(d->avctx, frame);
+                            if (ret >= 0) {
+                                ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
+                                if (ffp->decoder_reorder_pts == -1) {
+                                    frame->pts = frame->best_effort_timestamp;
+                                } else if (!ffp->decoder_reorder_pts) {
+                                    frame->pts = frame->pkt_dts;
+                                }
                             }
                         }
                         break;
@@ -5451,7 +5466,64 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                    
             // 检查是否是视频或音频流
             if (packet->stream_index == is->video_stream && ffp->out_video_stream_index >= 0) {
-                // 视频转码
+                // 检查是否是HEVC视频，如果是，可以直接写入包而不尝试解码
+                int is_hevc = (is->viddec.avctx && is->viddec.avctx->codec_id == AV_CODEC_ID_HEVC);
+                
+                // 对于HEVC视频，使用直接写入方式以避免解码问题
+                if (is_hevc && ffp->direct_hevc_write) {
+                    av_log(ffp, AV_LOG_DEBUG, "Direct HEVC packet writing mode, bypassing decode/encode");
+                    
+                    AVPacket *pkt_copy = (AVPacket *)av_malloc(sizeof(AVPacket));
+                    if (!pkt_copy) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet for direct HEVC writing");
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(ENOMEM);
+                    }
+                    
+                    av_new_packet(pkt_copy, 0);
+                    if (0 == av_packet_ref(pkt_copy, packet)) {
+                        // 设置流索引
+                        pkt_copy->stream_index = ffp->out_video_stream_index;
+                        
+                        // 转换时间戳
+                        AVStream *in_stream = is->ic->streams[packet->stream_index];
+                        AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                        
+                        if (!ffp->is_first) {
+                            ffp->is_first = 1;
+                            ffp->start_pts = pkt_copy->pts;
+                            ffp->start_dts = pkt_copy->dts;
+                            pkt_copy->pts = 0;
+                            pkt_copy->dts = 0;
+                        } else {
+                            if (pkt_copy->pts != AV_NOPTS_VALUE)
+                                pkt_copy->pts = av_rescale_q(pkt_copy->pts - ffp->start_pts,
+                                                           in_stream->time_base,
+                                                           out_stream->time_base);
+                            if (pkt_copy->dts != AV_NOPTS_VALUE)
+                                pkt_copy->dts = av_rescale_q(pkt_copy->dts - ffp->start_dts,
+                                                           in_stream->time_base,
+                                                           out_stream->time_base);
+                        }
+                        
+                        // 写入文件
+                        av_log(ffp, AV_LOG_DEBUG, "Writing HEVC packet directly, size=%d", pkt_copy->size);
+                        int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt_copy);
+                        if (ret < 0) {
+                            av_log(ffp, AV_LOG_ERROR, "Error writing direct HEVC frame: %s", av_err2str(ret));
+                        }
+                        
+                        av_packet_unref(pkt_copy);
+                        av_free(pkt_copy);
+                        
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    } else {
+                        av_free(pkt_copy);
+                    }
+                }
+                
+                // 标准视频转码路径
                 AVFrame *frame = av_frame_alloc();
                 if (!frame) {
                     av_log(ffp, AV_LOG_ERROR, "Failed to allocate video frame");
@@ -6118,6 +6190,7 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->is_first = 0;
     ffp->min_record_time = 5000; // Minimum recording time of 5 seconds
     ffp->record_start_time = av_gettime() / 1000; // Current time in milliseconds
+    ffp->direct_hevc_write = 1; // Enable direct HEVC packet writing by default
     
     if (!file_name || !strlen(file_name)) {
         av_log(ffp, AV_LOG_ERROR, "Invalid filename provided");
@@ -6255,6 +6328,31 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->video_only = (ffp->out_video_stream_index >= 0 && ffp->out_audio_stream_index < 0);
     if (ffp->video_only) {
         av_log(ffp, AV_LOG_INFO, "Video-only stream detected (no audio), configuring for video-only recording");
+    }
+    
+    // 检查是否是HEVC视频流
+    int has_hevc = 0;
+    if (is->viddec.avctx && is->viddec.avctx->codec_id == AV_CODEC_ID_HEVC) {
+        has_hevc = 1;
+        av_log(ffp, AV_LOG_INFO, "HEVC video stream detected, enabling special handling");
+        
+        // 为HEVC启用直接写入模式
+        ffp->direct_hevc_write = 1;
+        
+        // 如果是RTSP流，增加额外的安全措施
+        if (is->ic && is->ic->iformat && is->ic->iformat->name && 
+            (strstr(is->ic->iformat->name, "rtsp") || strstr(is->ic->url, "rtsp"))) {
+            av_log(ffp, AV_LOG_INFO, "RTSP+HEVC combination detected, using optimized settings");
+            
+            // 确保MP4元数据正确
+            av_dict_set(&ffp->m_ofmt_ctx->metadata, "encoder", "IJKPlayer HEVC Direct", 0);
+            
+            // 为HEVC流设置正确的时间基准
+            if (ffp->out_video_stream_index >= 0) {
+                AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                out_stream->time_base = (AVRational){1, 90000}; // 标准HEVC时间基准
+            }
+        }
     }
     
     // 分配临时帧

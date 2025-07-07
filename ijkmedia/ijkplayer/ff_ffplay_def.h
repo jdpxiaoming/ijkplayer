@@ -603,6 +603,7 @@ typedef struct FFPlayer {
     int64_t min_record_time;            // 最小录制时间(毫秒)
     int64_t record_start_time;          // 录制开始时间(毫秒)
     int video_only;                     // 是否只有视频流(无音频)
+    int direct_hevc_write;              // 是否直接写入HEVC包(不解码)
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
