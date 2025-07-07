@@ -604,7 +604,6 @@ typedef struct FFPlayer {
     int64_t record_start_time;          // 录制开始时间(毫秒)
     int video_only;                     // 是否只有视频流(无音频)
     int direct_hevc_write;              // 是否直接写入HEVC包(不解码)
-    AVPacket *hevc_packet_cache;        // 用于存储HEVC包的缓存
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
