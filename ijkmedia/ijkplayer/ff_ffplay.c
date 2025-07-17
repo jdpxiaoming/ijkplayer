@@ -5153,6 +5153,10 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     }
     ffp->m_ofmt = ffp->m_ofmt_ctx->oformat;
     
+    // 初始化时间戳追踪变量
+    ffp->last_video_dts = -1;
+    ffp->last_audio_dts = -1;
+    
     // 初始化记录实际时间的变量
     ffp->record_real_time = 0;
     
@@ -5271,11 +5275,27 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
                 
                 // 设置其他HEVC特定参数
                 av_dict_set(&ffp->m_ofmt_ctx->metadata, "encoder", "IJKPlayer HEVC", 0);
+                
+                // 显式设置codec_tag为"hvc1"而不是"hevc"或"hev1"
+                uint32_t hvc1_tag = MKTAG('h','v','c','1'); // 创建'hvc1'标签
+                out_stream->codecpar->codec_tag = hvc1_tag;
+                if (out_stream->codec) {
+                    out_stream->codec->codec_tag = hvc1_tag;
+                }
+                
+                // 添加HVC1特定的标志和参数
+                av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "iso6mp42hvc1", 0);
+                
+                av_log(ffp, AV_LOG_INFO, "Explicitly setting HEVC codec tag to 'hvc1' for better compatibility");
             }
         }
         
-        out_stream->codec->codec_tag = 0;
-        out_stream->codecpar->codec_tag = 0; // 让容器选择合适的标签
+        // 对于HEVC流，已经在上面设置了codec_tag，这里只处理非HEVC流
+        if (!(in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && 
+              in_stream->codecpar->codec_id == AV_CODEC_ID_HEVC)) {
+            out_stream->codec->codec_tag = 0;
+            out_stream->codecpar->codec_tag = 0; // 让容器选择合适的标签
+        }
         
         if (ffp->m_ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
             out_stream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;
@@ -5307,7 +5327,34 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     
     // 写视频文件头
     av_log(ffp, AV_LOG_INFO, "Writing file header");
-    ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
+    
+    // 检查是否有HEVC流，如果有则设置为hvc1格式
+    for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+        AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+        if (stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+            // 确保HEVC流使用'hvc1'标签
+            uint32_t hvc1_tag = MKTAG('h','v','c','1');
+            stream->codecpar->codec_tag = hvc1_tag;
+            if (stream->codec)
+                stream->codec->codec_tag = hvc1_tag;
+                
+            av_log(ffp, AV_LOG_INFO, "Found HEVC stream at index %d, forcing 'hvc1' codec tag", i);
+        }
+    }
+    
+    // 创建写入头部的选项
+    AVDictionary *header_opts = NULL;
+    av_dict_set(&header_opts, "movflags", "faststart+frag_keyframe", 0);
+    av_dict_set(&header_opts, "brand", "iso6", 0);
+    av_dict_set(&header_opts, "hvc1_tag", "hvc1", 0);  // 强制使用hvc1标签
+    
+    // 设置MP4容器的兼容性品牌
+    char *compatible_brands = "iso6mp42hvc1";
+    av_dict_set(&header_opts, "compatible_brands", compatible_brands, 0);
+    
+    ret = avformat_write_header(ffp->m_ofmt_ctx, &header_opts);
+    av_dict_free(&header_opts);
+    
     if (ret < 0) {
         av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file: %s\n", av_err2str(ret));
         goto end;
@@ -5488,6 +5535,30 @@ int ffp_stop_record(FFPlayer *ffp)
             }
             
             av_log(ffp, AV_LOG_INFO, "Writing file trailer...");
+            
+            // 确保所有HEVC流在写入尾部前保持正确的codec_tag
+            for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+                if (stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                    // 不修改已经设置好的codec_tag，确保与之前一致
+                    uint32_t hevc_tag = stream->codecpar->codec_tag;
+                    if (hevc_tag == 0) {
+                        // 如果没有设置，默认使用hvc1
+                        hevc_tag = MKTAG('h','v','c','1');
+                        stream->codecpar->codec_tag = hevc_tag;
+                        if (stream->codec)
+                            stream->codec->codec_tag = hevc_tag;
+                    }
+                    
+                    char tag_str[5] = {0};
+                    tag_str[0] = (hevc_tag >> 0) & 0xFF;
+                    tag_str[1] = (hevc_tag >> 8) & 0xFF;
+                    tag_str[2] = (hevc_tag >> 16) & 0xFF;
+                    tag_str[3] = (hevc_tag >> 24) & 0xFF;
+                    av_log(ffp, AV_LOG_INFO, "Final check: ensuring HEVC stream %d has '%s' codec tag", i, tag_str);
+                }
+            }
+            
             int ret = av_write_trailer(ffp->m_ofmt_ctx);
             if (ret < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Error writing trailer: %s", av_err2str(ret));
@@ -5679,46 +5750,51 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                         av_log(ffp, AV_LOG_INFO, "First video packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
                                ffp->start_pts, ffp->start_dts, ffp->record_real_time);
                     } else {
-                        // 计算当前实际经过的时间（毫秒）
-                        int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
-                        
-                        // 基于实际时间计算PTS/DTS，确保正常速度
+                        // 处理后续视频帧
                         if (pkt->pts != AV_NOPTS_VALUE) {
-                            // 将实际时间转换为输出时基单位
-                            pkt->pts = av_rescale_q(elapsed_real_time, 
-                                                  (AVRational){1, 1000}, // 毫秒时基
-                                                  out_stream->time_base);
-                            av_log(ffp, AV_LOG_DEBUG, "Video packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
-                                   elapsed_real_time, pkt->pts);
-                        }
-                        
-                        // Ensure DTS is strictly increasing
-                        if (pkt->dts != AV_NOPTS_VALUE) {
-                            int64_t new_dts = av_rescale_q(elapsed_real_time, 
-                                                        (AVRational){1, 1000},
-                                                        out_stream->time_base);
+                            // 计算相对于第一帧的时间差
+                            int64_t pts_diff = pkt->pts - ffp->start_pts;
                             
-                            // Make sure DTS is strictly greater than the previous one
-                            if (new_dts <= ffp->last_video_dts) {
-                                new_dts = ffp->last_video_dts + 1;
+                            // 转换到输出时基
+                            pkt->pts = av_rescale_q(pts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保PTS始终递增
+                            if (pkt->pts <= ffp->last_video_dts) {
+                                pkt->pts = ffp->last_video_dts + 1;
                             }
                             
-                            pkt->dts = new_dts;
-                            ffp->last_video_dts = new_dts;
+                            av_log(ffp, AV_LOG_DEBUG, "Video packet: pts_diff=%"PRId64", new_pts=%"PRId64, 
+                                pts_diff, pkt->pts);
+                        }
+                        
+                        // 处理DTS
+                        if (pkt->dts != AV_NOPTS_VALUE) {
+                            // 计算相对于第一帧的时间差
+                            int64_t dts_diff = pkt->dts - ffp->start_dts;
                             
-                            // Ensure PTS is not less than DTS
+                            // 转换到输出时基
+                            pkt->dts = av_rescale_q(dts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保DTS始终递增
+                            if (pkt->dts <= ffp->last_video_dts) {
+                                pkt->dts = ffp->last_video_dts + 1;
+                            }
+                            
+                            ffp->last_video_dts = pkt->dts;
+                            
+                            // 确保PTS不小于DTS
                             if (pkt->pts < pkt->dts) {
                                 pkt->pts = pkt->dts;
                             }
                         } else {
-                            // If no DTS, use PTS
+                            // 如果没有DTS，使用PTS
                             if (pkt->pts != AV_NOPTS_VALUE) {
                                 pkt->dts = pkt->pts;
                                 
-                                // Ensure DTS is strictly increasing
+                                // 确保DTS始终递增
                                 if (pkt->dts <= ffp->last_video_dts) {
                                     pkt->dts = ffp->last_video_dts + 1;
-                                    pkt->pts = pkt->dts; // Keep PTS and DTS in sync
+                                    pkt->pts = pkt->dts; // 保持PTS和DTS同步
                                 }
                                 
                                 ffp->last_video_dts = pkt->dts;
@@ -5726,7 +5802,10 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                         }
                     }
                     
-                    pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                    // 转换持续时间
+                    if (pkt->duration > 0) {
+                        pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                    }
                     pkt->pos = -1;
                     
                     // 写入文件
@@ -5762,8 +5841,50 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                         return AVERROR(ENOMEM);
                     }
                     
-                    av_new_packet(pkt_copy, 0);
+                    // 确保输出流使用正确的codec_tag
+                    if (ffp->out_video_stream_index >= 0 && ffp->out_video_stream_index < ffp->m_ofmt_ctx->nb_streams) {
+                        AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                        AVStream *in_stream = is->ic->streams[packet->stream_index];
+                        
+                        if (out_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                            // 检查输入流的codec_tag
+                            uint32_t hevc_tag;
+                            if (in_stream->codecpar->codec_tag != 0) {
+                                // 保持与输入流相同的codec_tag
+                                hevc_tag = in_stream->codecpar->codec_tag;
+                                char tag_str[5] = {0};
+                                tag_str[0] = (hevc_tag >> 0) & 0xFF;
+                                tag_str[1] = (hevc_tag >> 8) & 0xFF;
+                                tag_str[2] = (hevc_tag >> 16) & 0xFF;
+                                tag_str[3] = (hevc_tag >> 24) & 0xFF;
+                                av_log(ffp, AV_LOG_DEBUG, "Preserving original HEVC codec tag during packet writing: '%s' (0x%08x)", 
+                                       tag_str, hevc_tag);
+                            } else {
+                                // 默认使用hvc1标签
+                                hevc_tag = MKTAG('h','v','c','1');
+                                av_log(ffp, AV_LOG_DEBUG, "Using default 'hvc1' codec tag for HEVC stream");
+                            }
+                            
+                            out_stream->codecpar->codec_tag = hevc_tag;
+                            if (out_stream->codec)
+                                out_stream->codec->codec_tag = hevc_tag;
+                                
+                            // 确保MP4容器使用��确的标签
+                            if (hevc_tag == MKTAG('h','v','c','1')) {
+                                av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "iso6mp42hvc1", 0);
+                            } else if (hevc_tag == MKTAG('h','e','v','1')) {
+                                av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "iso6mp42hev1", 0);
+                            }
+                        }
+                    }
+                    
+                    // 使用av_packet_alloc替代av_new_packet
                     if (0 == av_packet_ref(pkt_copy, packet)) {
+                        // 确保NAL单元类型在日志中可见
+                        if (pkt_copy->size >= 5) {
+                            uint8_t nal_type = (pkt_copy->data[4] >> 1) & 0x3f;
+                            av_log(ffp, AV_LOG_DEBUG, "HEVC NAL unit type: %d, size: %d", nal_type, pkt_copy->size);
+                        }
                         // 设置流索引
                         pkt_copy->stream_index = ffp->out_video_stream_index;
                         
@@ -5783,46 +5904,51 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                             av_log(ffp, AV_LOG_INFO, "First HEVC packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
                                 ffp->start_pts, ffp->start_dts, ffp->record_real_time);
                         } else {
-                            // 计算当前实际经过的时间（毫秒）
-                            int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
-                            
-                            // 基于实际时间计算PTS/DTS，确保正常速度
+                            // 处理后续视频帧
                             if (pkt_copy->pts != AV_NOPTS_VALUE) {
-                                // 将实际时间转换为输出时基单位
-                                pkt_copy->pts = av_rescale_q(elapsed_real_time, 
-                                                        (AVRational){1, 1000}, // 毫秒时基
-                                                        out_stream->time_base);
-                                av_log(ffp, AV_LOG_DEBUG, "HEVC packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
-                                    elapsed_real_time, pkt_copy->pts);
-                            }
-                            
-                            // Ensure DTS is strictly increasing
-                            if (pkt_copy->dts != AV_NOPTS_VALUE) {
-                                int64_t new_dts = av_rescale_q(elapsed_real_time, 
-                                                            (AVRational){1, 1000},
-                                                            out_stream->time_base);
+                                // 计算相对于第一帧的时间差
+                                int64_t pts_diff = pkt_copy->pts - ffp->start_pts;
                                 
-                                // Make sure DTS is strictly greater than the previous one
-                                if (new_dts <= ffp->last_video_dts) {
-                                    new_dts = ffp->last_video_dts + 1;
+                                // 转换到输出时基
+                                pkt_copy->pts = av_rescale_q(pts_diff, in_stream->time_base, out_stream->time_base);
+                                
+                                // 确保PTS始终递增
+                                if (pkt_copy->pts <= ffp->last_video_dts) {
+                                    pkt_copy->pts = ffp->last_video_dts + 1;
                                 }
                                 
-                                pkt_copy->dts = new_dts;
-                                ffp->last_video_dts = new_dts;
+                                av_log(ffp, AV_LOG_DEBUG, "HEVC packet: pts_diff=%"PRId64", new_pts=%"PRId64, 
+                                    pts_diff, pkt_copy->pts);
+                            }
+                            
+                            // 处理DTS
+                            if (pkt_copy->dts != AV_NOPTS_VALUE) {
+                                // 计算相对于第一帧的时间差
+                                int64_t dts_diff = pkt_copy->dts - ffp->start_dts;
                                 
-                                // Ensure PTS is not less than DTS
+                                // 转换到输出时基
+                                pkt_copy->dts = av_rescale_q(dts_diff, in_stream->time_base, out_stream->time_base);
+                                
+                                // 确保DTS始终递增
+                                if (pkt_copy->dts <= ffp->last_video_dts) {
+                                    pkt_copy->dts = ffp->last_video_dts + 1;
+                                }
+                                
+                                ffp->last_video_dts = pkt_copy->dts;
+                                
+                                // 确保PTS不小于DTS
                                 if (pkt_copy->pts < pkt_copy->dts) {
                                     pkt_copy->pts = pkt_copy->dts;
                                 }
                             } else {
-                                // If no DTS, use PTS
+                                // 如果没有DTS，使用PTS
                                 if (pkt_copy->pts != AV_NOPTS_VALUE) {
                                     pkt_copy->dts = pkt_copy->pts;
                                     
-                                    // Ensure DTS is strictly increasing
+                                    // 确保DTS始终递增
                                     if (pkt_copy->dts <= ffp->last_video_dts) {
                                         pkt_copy->dts = ffp->last_video_dts + 1;
-                                        pkt_copy->pts = pkt_copy->dts; // Keep PTS and DTS in sync
+                                        pkt_copy->pts = pkt_copy->dts; // 保持PTS和DTS同步
                                     }
                                     
                                     ffp->last_video_dts = pkt_copy->dts;
@@ -5830,20 +5956,36 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                             }
                         }
                         
+                        // 转换持续时间
+                        if (pkt_copy->duration > 0) {
+                            pkt_copy->duration = av_rescale_q(pkt_copy->duration, in_stream->time_base, out_stream->time_base);
+                        }
+                        
                         // 写入文件
-                        av_log(ffp, AV_LOG_DEBUG, "Writing HEVC packet directly, size=%d", pkt_copy->size);
-                        int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt_copy);
-                        if (ret < 0) {
-                            av_log(ffp, AV_LOG_ERROR, "Error writing direct HEVC frame: %s", av_err2str(ret));
+                        av_log(ffp, AV_LOG_DEBUG, "Writing HEVC packet directly, size=%d, pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", tb=%d/%d",
+                               pkt_copy->size, pkt_copy->pts, pkt_copy->dts, pkt_copy->duration,
+                               out_stream->time_base.num, out_stream->time_base.den);
+                        
+                        // 确保包有效载荷不为空
+                        if (pkt_copy->size == 0 || !pkt_copy->data) {
+                            av_log(ffp, AV_LOG_WARNING, "Empty packet detected, skipping write");
+                        } else {
+                            int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt_copy);
+                            if (ret < 0) {
+                                av_log(ffp, AV_LOG_ERROR, "Error writing direct HEVC frame: %s", av_err2str(ret));
+                            } else {
+                                av_log(ffp, AV_LOG_DEBUG, "Successfully wrote HEVC packet of size %d", pkt_copy->size);
+                            }
                         }
                         
                         av_packet_unref(pkt_copy);
-                        av_free(pkt_copy);
+                        av_packet_free(&pkt_copy);
                         
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return ret;
                     } else {
-                        av_free(pkt_copy);
+                        av_log(ffp, AV_LOG_ERROR, "Failed to reference packet for HEVC direct writing");
+                        av_packet_free(&pkt_copy);
                     }
                 }
                 
@@ -6367,8 +6509,22 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                             av_log(ffp, AV_LOG_DEBUG, "Rescaled audio timestamps, after: pts=%"PRId64", dts=%"PRId64,
                                 enc_pkt.pts, enc_pkt.dts);
                             
+                            // 确保音频DTS严格递增
+                            if (ffp->last_audio_dts != -1 && enc_pkt.dts <= ffp->last_audio_dts) {
+                                av_log(ffp, AV_LOG_WARNING, "Non-monotonic audio DTS detected: %"PRId64" <= %"PRId64", fixing...", 
+                                       enc_pkt.dts, ffp->last_audio_dts);
+                                enc_pkt.dts = ffp->last_audio_dts + 1;
+                                // 确保PTS不小于DTS
+                                if (enc_pkt.pts < enc_pkt.dts) {
+                                    enc_pkt.pts = enc_pkt.dts;
+                                }
+                            }
+                            
+                            // 更新最后一个音频DTS
+                            ffp->last_audio_dts = enc_pkt.dts;
+                            
                             // 写入文件
-                            av_log(ffp, AV_LOG_DEBUG, "Writing audio packet to file, size=%d", enc_pkt.size);
+                            av_log(ffp, AV_LOG_DEBUG, "Writing audio packet to file, size=%d, dts=%"PRId64, enc_pkt.size, enc_pkt.dts);
                             ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
                             if (ret < 0) {
                                 av_log(ffp, AV_LOG_ERROR, "Error writing audio frame: %s", av_err2str(ret));
@@ -6750,8 +6906,14 @@ int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out_stream
         return ret;
     }
     
-    // 明确设置codecpar的codec_tag为0，让容器自己选择合适的标签
-    out_stream->codecpar->codec_tag = 0;
+    // 对于HEVC视频，强制使用hvc1标签，否则让容器自己选择合适的标签
+    if (dec_ctx->codec_id == AV_CODEC_ID_HEVC) {
+        uint32_t hvc1_tag = MKTAG('h','v','c','1');
+        out_stream->codecpar->codec_tag = hvc1_tag;
+        av_log(ffp, AV_LOG_INFO, "Forcing HEVC codec tag to 'hvc1' in transcoder initialization");
+    } else {
+        out_stream->codecpar->codec_tag = 0;
+    }
     
     // 对于音频，确保MP4容器中始终使用AAC
     if (type == AVMEDIA_TYPE_AUDIO && ffp->m_ofmt && strcmp(ffp->m_ofmt->name, "mp4") == 0) {
@@ -6832,6 +6994,10 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     ffp->m_ofmt = ffp->m_ofmt_ctx->oformat;
     av_log(ffp, AV_LOG_DEBUG, "Output format: %s", ffp->m_ofmt->name);
     
+    // 初始化时间戳追踪变量
+    ffp->last_video_dts = -1;
+    ffp->last_audio_dts = -1;
+    
     // 创建输出流
     av_log(ffp, AV_LOG_DEBUG, "Creating output streams, input has %d streams", is->ic->nb_streams);
     for (i = 0; i < is->ic->nb_streams; i++) {
@@ -6884,9 +7050,35 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                    out_stream->time_base.num, out_stream->time_base.den);
             
             // 确保设置正确的编解码器标记
-            out_stream->codecpar->codec_tag = 0;
-            if (out_stream->codec) {
-                out_stream->codec->codec_tag = 0;
+            // 对于HEVC视频，检查输入流的codec_tag并保持一致
+            if (out_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                uint32_t hevc_tag;
+                
+                // 检查输入流的codec_tag
+                if (in_stream->codecpar->codec_tag != 0) {
+                    // 使用输入流的codec_tag
+                    hevc_tag = in_stream->codecpar->codec_tag;
+                    char tag_str[5] = {0};
+                    tag_str[0] = (hevc_tag >> 0) & 0xFF;
+                    tag_str[1] = (hevc_tag >> 8) & 0xFF;
+                    tag_str[2] = (hevc_tag >> 16) & 0xFF;
+                    tag_str[3] = (hevc_tag >> 24) & 0xFF;
+                    av_log(ffp, AV_LOG_INFO, "Preserving original HEVC codec tag: '%s' (0x%08x)", tag_str, hevc_tag);
+                } else {
+                    // 默认使用hvc1标签
+                    hevc_tag = MKTAG('h','v','c','1');
+                    av_log(ffp, AV_LOG_INFO, "Input has no codec tag, forcing HEVC codec tag to 'hvc1'");
+                }
+                
+                out_stream->codecpar->codec_tag = hevc_tag;
+                if (out_stream->codec) {
+                    out_stream->codec->codec_tag = hevc_tag;
+                }
+            } else {
+                out_stream->codecpar->codec_tag = 0;
+                if (out_stream->codec) {
+                    out_stream->codec->codec_tag = 0;
+                }
             }
             
             ffp->out_video_stream_index = out_stream->index;
