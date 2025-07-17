@@ -6578,9 +6578,18 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                     
                 if (!ffp->is_first) { 
                         // 录制的第一帧，时间从0开始
-                        // 对于HEVC视频，确保第一帧是关键帧
-                        if (is_hevc && !(pkt->flags & AV_PKT_FLAG_KEY)) {
-                            av_log(ffp, AV_LOG_WARNING, "First HEVC frame is not a keyframe, waiting for keyframe");
+                        // 确保第一帧是关键帧，无论是什么类型的视频
+                        if (is_video && !(pkt->flags & AV_PKT_FLAG_KEY)) {
+                            av_log(ffp, AV_LOG_WARNING, "First video frame is not a keyframe, waiting for keyframe");
+                            av_packet_unref(pkt);
+                            av_packet_free(&pkt);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return 0;
+                        }
+                        
+                        // 如果是音频包，但还没有收到视频关键帧，也等待
+                        if (!is_video && has_audio && is->video_stream >= 0) {
+                            av_log(ffp, AV_LOG_DEBUG, "Received audio packet but waiting for video keyframe first");
                             av_packet_unref(pkt);
                             av_packet_free(&pkt);
                             pthread_mutex_unlock(&ffp->record_mutex);
@@ -6598,68 +6607,122 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                         av_log(ffp, AV_LOG_INFO, "First packet, start_pts=%"PRId64", start_dts=%"PRId64", is_hevc=%d, flags=%d",
                             ffp->start_pts, ffp->start_dts, is_hevc, pkt->flags);
                 } else {
-                    // 使用实际时间作为基准计算PTS/DTS
-                    int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
-
+                    // 使用原始时间戳差值而不是实际时间
                     if (is_video) {
-                        // 视频流时，使用实际时间作为基准
-                        int64_t new_pts = av_rescale_q(elapsed_real_time, 
-                                                   (AVRational){1, 1000}, 
-                                                   out_stream->time_base);
-
-                        int64_t new_dts = new_pts;
-
-                        // 确保DTS严格递增
-                        if (new_dts <= ffp->last_video_dts) {
-                            new_dts = ffp->last_video_dts + 1;
+                        // 视频流
+                        if (pkt->pts != AV_NOPTS_VALUE) {
+                            // 计算相对于第一帧的时间差
+                            int64_t pts_diff = pkt->pts - ffp->start_pts;
+                            
+                            // 转换到输出时基
+                            pkt->pts = av_rescale_q(pts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保PTS始终递增
+                            if (pkt->pts <= ffp->last_video_dts && ffp->last_video_dts > 0) {
+                                pkt->pts = ffp->last_video_dts + 1;
+                            }
+                            
+                            av_log(ffp, AV_LOG_DEBUG, "Video packet: pts_diff=%"PRId64", new_pts=%"PRId64, 
+                                pts_diff, pkt->pts);
                         }
-
-                        pkt->dts = new_dts;
-                        ffp->last_video_dts = new_dts;
-
-                        // 对于HEVC视频，PTS可以等于DTS
-                        if (is_hevc) {
-                            pkt->pts = new_dts;
+                        
+                        // 处理DTS
+                        if (pkt->dts != AV_NOPTS_VALUE) {
+                            // 计算相对于第一帧的时间差
+                            int64_t dts_diff = pkt->dts - ffp->start_dts;
+                            
+                            // 转换到输出时基
+                            pkt->dts = av_rescale_q(dts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保DTS始终递增
+                            if (pkt->dts <= ffp->last_video_dts && ffp->last_video_dts > 0) {
+                                pkt->dts = ffp->last_video_dts + 1;
+                            }
+                            
+                            ffp->last_video_dts = pkt->dts;
+                            
+                            // 确保PTS不小于DTS
+                            if (pkt->pts < pkt->dts) {
+                                pkt->pts = pkt->dts;
+                            }
                         } else {
-                            pkt->pts = new_pts > new_dts ? new_pts : new_dts;
+                            // 如果没有DTS，使用PTS
+                            if (pkt->pts != AV_NOPTS_VALUE) {
+                                pkt->dts = pkt->pts;
+                                
+                                // 确保DTS始终递增
+                                if (pkt->dts <= ffp->last_video_dts && ffp->last_video_dts > 0) {
+                                    pkt->dts = ffp->last_video_dts + 1;
+                                    pkt->pts = pkt->dts; // 保持PTS和DTS同步
+                                }
+                                
+                                ffp->last_video_dts = pkt->dts;
+                            }
                         }
-
-                        av_log(ffp, AV_LOG_DEBUG, "Video packet: real_time=%"PRId64"ms, pts=%"PRId64", dts=%"PRId64", is_hevc=%d", 
-                               elapsed_real_time, pkt->pts, pkt->dts, is_hevc);
                     } else if (pkt->stream_index == is->audio_stream) {
                         // 音频流
-                        int64_t new_pts = av_rescale_q(elapsed_real_time, 
-                                                   (AVRational){1, 1000}, 
-                                                   out_stream->time_base);
-
-                        int64_t new_dts = new_pts;
-
-                        // 确保DTS严格递增
-                        if (new_dts <= ffp->last_audio_dts) {
-                            new_dts = ffp->last_audio_dts + 1;
+                        if (pkt->pts != AV_NOPTS_VALUE) {
+                            // 计算相对于第一帧的时间差
+                            int64_t pts_diff = pkt->pts - ffp->start_pts;
+                            
+                            // 转换到输出时基
+                            pkt->pts = av_rescale_q(pts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保PTS始终递增
+                            if (pkt->pts <= ffp->last_audio_dts && ffp->last_audio_dts > 0) {
+                                pkt->pts = ffp->last_audio_dts + 1;
+                            }
+                            
+                            av_log(ffp, AV_LOG_DEBUG, "Audio packet: pts_diff=%"PRId64", new_pts=%"PRId64, 
+                                pts_diff, pkt->pts);
                         }
-
-                        pkt->dts = new_dts;
-                        pkt->pts = new_dts;
-                        ffp->last_audio_dts = new_dts;
-
-                        av_log(ffp, AV_LOG_DEBUG, "Audio packet: real_time=%"PRId64"ms, pts=%"PRId64", dts=%"PRId64, 
-                               elapsed_real_time, pkt->pts, pkt->dts);
+                        
+                        // 处理DTS
+                        if (pkt->dts != AV_NOPTS_VALUE) {
+                            // 计算相对于第一帧的时间差
+                            int64_t dts_diff = pkt->dts - ffp->start_dts;
+                            
+                            // 转换到输出时基
+                            pkt->dts = av_rescale_q(dts_diff, in_stream->time_base, out_stream->time_base);
+                            
+                            // 确保DTS始终递增
+                            if (pkt->dts <= ffp->last_audio_dts && ffp->last_audio_dts > 0) {
+                                pkt->dts = ffp->last_audio_dts + 1;
+                            }
+                            
+                            ffp->last_audio_dts = pkt->dts;
+                            
+                            // 确保PTS不小于DTS
+                            if (pkt->pts < pkt->dts) {
+                                pkt->pts = pkt->dts;
+                            }
+                        } else {
+                            // 如果没有DTS，使用PTS
+                            if (pkt->pts != AV_NOPTS_VALUE) {
+                                pkt->dts = pkt->pts;
+                                
+                                // 确保DTS始终递增
+                                if (pkt->dts <= ffp->last_audio_dts && ffp->last_audio_dts > 0) {
+                                    pkt->dts = ffp->last_audio_dts + 1;
+                                    pkt->pts = pkt->dts; // 保持PTS和DTS同步
+                                }
+                                
+                                ffp->last_audio_dts = pkt->dts;
+                            }
+                        }
                     } else {
                         // 其他类型的流（如字幕等）
                         pkt->pts = abs(pkt->pts - ffp->start_pts);
                         pkt->dts = abs(pkt->dts - ffp->start_dts);
                     }
                 }
-                // 转换PTS/DTS
-                av_log(ffp, AV_LOG_DEBUG, "Rescaling timestamps, before: pts=%"PRId64", dts=%"PRId64,
-                        pkt->pts, pkt->dts);
-                        
-                pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-                pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-                pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                // 转换持续时间
+                if (pkt->duration > 0) {
+                    pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                }
+                
                 pkt->pos = -1;
-                av_log(ffp, AV_LOG_DEBUG, "Rescaled packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
+                av_log(ffp, AV_LOG_DEBUG, "Final packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
                         pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
                 // 写入一个AVPacket到输出文件
                 if (is_hevc) {
