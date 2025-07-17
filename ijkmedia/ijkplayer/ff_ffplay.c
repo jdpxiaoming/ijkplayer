@@ -5785,6 +5785,10 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                         return AVERROR(EINVAL);
                     }
                     
+                    // 确保输出流使用标准MP4时间基准
+                    out_stream->time_base = (AVRational){1, 90000};
+                    av_log(ffp, AV_LOG_INFO, "Setting output stream time base to 1/90000 for better compatibility");
+                    
                     // Use the global last_video_dts instead of a static variable
                     
                     if (!ffp->is_first) {
@@ -5824,8 +5828,14 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                                 av_log(ffp, AV_LOG_WARNING, "Negative PTS diff detected, correcting to 0");
                             }
                             
-                            // 转换到输出时基
-                            pkt->pts = av_rescale_q(pts_diff, in_stream->time_base, out_stream->time_base);
+                            // 使用固定的90000Hz时间基准，这是MP4容器的标准
+                            AVRational standard_tb = {1, 90000};
+                            
+                            // 先转换到标准时间基准
+                            pkt->pts = av_rescale_q(pts_diff, in_stream->time_base, standard_tb);
+                            
+                            // 再转换到输出时基
+                            pkt->pts = av_rescale_q(pkt->pts, standard_tb, out_stream->time_base);
                             
                             // 确保PTS始终递增
                             if (pkt->pts <= ffp->last_video_dts && ffp->last_video_dts > 0) {
@@ -5841,8 +5851,14 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                             // 计算相对于第一帧的时间差
                             int64_t dts_diff = pkt->dts - ffp->start_dts;
                             
-                            // 转换到输出时基
-                            pkt->dts = av_rescale_q(dts_diff, in_stream->time_base, out_stream->time_base);
+                            // 使用固定的90000Hz时间基准
+                            AVRational standard_tb = {1, 90000};
+                            
+                            // 先转换到标准时间基准
+                            pkt->dts = av_rescale_q(dts_diff, in_stream->time_base, standard_tb);
+                            
+                            // 再转换到输出时基
+                            pkt->dts = av_rescale_q(pkt->dts, standard_tb, out_stream->time_base);
                             
                             // 确保DTS始终递增
                             if (pkt->dts <= ffp->last_video_dts) {
