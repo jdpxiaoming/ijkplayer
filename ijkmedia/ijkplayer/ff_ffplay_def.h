@@ -51,6 +51,8 @@
 #include "libavutil/opt.h"
 #include "libavcodec/avfft.h"
 #include "libswresample/swresample.h"
+#include "libavutil/audio_fifo.h"
+
 
 #if CONFIG_AVFILTER
 # include "libavfilter/avfilter.h"
@@ -578,14 +580,20 @@ typedef struct FFPlayer {
     AVInputFormat *file_iformat;
 #endif
     char *input_filename;
-    int delay_forbidden;//0延迟 ：0:关闭 1：开启add by poe 2024/07/25. 
-    
+    int delay_forbidden;//0延迟 ：0:关闭 1：开启add by poe 2024/07/25.
+
     //录制视频增加的变量.
     AVFormatContext *m_ofmt_ctx;        // 用于输出的AVFormatContext结构体
     AVOutputFormat *m_ofmt;
     pthread_mutex_t record_mutex;       // 锁
     int is_record;                      // 是否在录制
     int record_error;
+
+    int waiting_for_keyframe;           // a new field to indicate if we are waiting for the first video keyframe
+    PacketQueue record_audio_queue;     // a new packet queue to buffer audio packets
+    int64_t record_first_vpts;          // a new field to store the timestamp of the first keyframe
+    AVAudioFifo *record_audio_fifo;     // FIFO for audio transcoding
+    int64_t record_next_audio_pts;      // PTS for next audio frame to be encoded
 
     // 转码相关变量
     int need_transcode;                 // 是否需要转码
@@ -793,7 +801,7 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->autoexit               = 0;
     ffp->loop                   = 1;
     ffp->framedrop              = 0; // option
-    ffp->delay_forbidden		= 0; // default close the delay option . 
+    ffp->delay_forbidden		= 0; // default close the delay option .
     ffp->seek_at_start          = 0;
     ffp->infinite_buffer        = -1;
     ffp->show_mode              = SHOW_MODE_NONE;
