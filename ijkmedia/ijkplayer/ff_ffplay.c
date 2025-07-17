@@ -7,7 +7,8 @@
  *
  * ijkPlayer is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
+ * License as published by the Free Software
+ * Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
  *
  * ijkPlayer is distributed in the hope that it will be useful,
@@ -5327,41 +5328,48 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         }
     }
     
-    // 写视频文件头
-    av_log(ffp, AV_LOG_INFO, "Writing file header");
-    
-    // 检查是否有HEVC流，如果有则设置为hvc1格式
-    for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-        AVStream *stream = ffp->m_ofmt_ctx->streams[i];
-        if (stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
-            // 确保HEVC流使用'hvc1'标签
-            uint32_t hvc1_tag = MKTAG('h','v','c','1');
-            stream->codecpar->codec_tag = hvc1_tag;
-            if (stream->codec)
-                stream->codec->codec_tag = hvc1_tag;
+    // MP4容器的特殊处理 - 确保所有音频流使用正确编解码器标签
+    if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+        // 设置MP4特定选项，解决Android 15播放速度问题
+        av_dict_set(&ffp->m_ofmt_ctx->metadata, "brand", "mp42", 0);
+        av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "isommp42hvc1", 0);
+        
+        // 设置moov atom放在文件开头，这对Android 15非常重要
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "movflags", "faststart", 0);
+        
+        for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+            AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+            if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                // 强制设置为AAC，不管原始格式是什么
+                av_log(ffp, AV_LOG_WARNING, "MP4 container: ensuring audio stream uses AAC codec (current id=%d)",
+                      stream->codecpar->codec_id);
                 
-            av_log(ffp, AV_LOG_INFO, "Found HEVC stream at index %d, forcing 'hvc1' codec tag", i);
+                // 设置codecpar
+                stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+                stream->codecpar->codec_tag = 0; // 让容器选择合适的tag
+                
+                // 同时设置codec（为了兼容性）
+                if (stream->codec) {
+                    stream->codec->codec_id = AV_CODEC_ID_AAC;
+                    stream->codec->codec_tag = 0;
+                }
+            }
         }
+        
+        // 使用选项写入文件头
+        ret = avformat_write_header(ffp->m_ofmt_ctx, &opts);
+        av_dict_free(&opts);
+    } else {
+        // 写视频文件头
+        av_log(ffp, AV_LOG_DEBUG, "Writing file header");
+        ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
     }
-    
-    // 创建写入头部的选项
-    AVDictionary *header_opts = NULL;
-    av_dict_set(&header_opts, "movflags", "faststart+frag_keyframe", 0);
-    av_dict_set(&header_opts, "brand", "iso6", 0);
-    av_dict_set(&header_opts, "hvc1_tag", "hvc1", 0);  // 强制使用hvc1标签
-    
-    // 设置MP4容器的兼容性品牌
-    char *compatible_brands = "iso6mp42hvc1";
-    av_dict_set(&header_opts, "compatible_brands", compatible_brands, 0);
-    
-    ret = avformat_write_header(ffp->m_ofmt_ctx, &header_opts);
-    av_dict_free(&header_opts);
     
     if (ret < 0) {
-        av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file: %s\n", av_err2str(ret));
+        av_log(ffp, AV_LOG_ERROR, "Error writing file header: %s", av_err2str(ret));
         goto end;
     }
-    av_log(ffp, AV_LOG_INFO, "File header written successfully");
     
     ffp->is_record = 1;
     ffp->record_error = 0;
@@ -7479,11 +7487,16 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         }
     }
     
-    // 写视频文件头
-    av_log(ffp, AV_LOG_DEBUG, "Writing file header");
-    
     // MP4容器的特殊处理 - 确保所有音频流使用正确编解码器标签
     if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+        // 设置MP4特定选项，解决Android 15播放速度问题
+        av_dict_set(&ffp->m_ofmt_ctx->metadata, "brand", "mp42", 0);
+        av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "isommp42hvc1", 0);
+        
+        // 设置moov atom放在文件开头，这对Android 15非常重要
+        AVDictionary *opts = NULL;
+        av_dict_set(&opts, "movflags", "faststart", 0);
+        
         for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
             AVStream *stream = ffp->m_ofmt_ctx->streams[i];
             if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -7502,9 +7515,16 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                 }
             }
         }
+        
+        // 使用选项写入文件头
+        ret = avformat_write_header(ffp->m_ofmt_ctx, &opts);
+        av_dict_free(&opts);
+    } else {
+        // 写视频文件头
+        av_log(ffp, AV_LOG_DEBUG, "Writing file header");
+        ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
     }
     
-    ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
     if (ret < 0) {
         av_log(ffp, AV_LOG_ERROR, "Error writing file header: %s", av_err2str(ret));
         goto end;
