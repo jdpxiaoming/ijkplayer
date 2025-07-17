@@ -5516,8 +5516,7 @@ void ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf)
 
 
 //保存文件
-int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
-{
+int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
     assert(ffp);
     VideoState *is = ffp->is;
     int ret = 0;
@@ -5528,7 +5527,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
         if (packet == NULL) {
             ffp->record_error = 1;
             av_log(ffp, AV_LOG_ERROR, "packet == NULL");
-        return -1;
+            return -1;
         }
 
         pthread_mutex_lock(&ffp->record_mutex);
@@ -5703,65 +5702,64 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         // 转换时间戳
                         AVStream *in_stream = is->ic->streams[packet->stream_index];
                         AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
-                        
-                                                                // Use the global last_video_dts for HEVC packets as well
+                         // Use the global last_video_dts for HEVC packets as well
                     
-                    if (!ffp->is_first) {
-                        ffp->is_first = 1;
-                        ffp->start_pts = pkt_copy->pts;
-                        ffp->start_dts = pkt_copy->dts;
-                        ffp->record_real_time = av_gettime_relative() / 1000; // 记录实际开始时间（毫秒）
-                        pkt_copy->pts = 0;
-                        pkt_copy->dts = 0;
-                        ffp->last_video_dts = 0; // Initialize last DTS
-                        av_log(ffp, AV_LOG_INFO, "First HEVC packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
-                               ffp->start_pts, ffp->start_dts, ffp->record_real_time);
-                    } else {
-                        // 计算当前实际经过的时间（毫秒）
-                        int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
-                        
-                        // 基于实际时间计算PTS/DTS，确保正常速度
-                        if (pkt_copy->pts != AV_NOPTS_VALUE) {
-                            // 将实际时间转换为输出时基单位
-                            pkt_copy->pts = av_rescale_q(elapsed_real_time, 
-                                                      (AVRational){1, 1000}, // 毫秒时基
-                                                      out_stream->time_base);
-                            av_log(ffp, AV_LOG_DEBUG, "HEVC packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
-                                   elapsed_real_time, pkt_copy->pts);
-                        }
-                        
-                        // Ensure DTS is strictly increasing
-                        if (pkt_copy->dts != AV_NOPTS_VALUE) {
-                            int64_t new_dts = av_rescale_q(elapsed_real_time, 
-                                                        (AVRational){1, 1000},
-                                                        out_stream->time_base);
-                            
-                            // Make sure DTS is strictly greater than the previous one
-                            if (new_dts <= ffp->last_video_dts) {
-                                new_dts = ffp->last_video_dts + 1;
-                            }
-                            
-                            pkt_copy->dts = new_dts;
-                            ffp->last_video_dts = new_dts;
-                            
-                            // Ensure PTS is not less than DTS
-                            if (pkt_copy->pts < pkt_copy->dts) {
-                                pkt_copy->pts = pkt_copy->dts;
-                            }
+                        if (!ffp->is_first) {
+                            ffp->is_first = 1;
+                            ffp->start_pts = pkt_copy->pts;
+                            ffp->start_dts = pkt_copy->dts;
+                            ffp->record_real_time = av_gettime_relative() / 1000; // 记录实际开始时间（毫秒）
+                            pkt_copy->pts = 0;
+                            pkt_copy->dts = 0;
+                            ffp->last_video_dts = 0; // Initialize last DTS
+                            av_log(ffp, AV_LOG_INFO, "First HEVC packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
+                                ffp->start_pts, ffp->start_dts, ffp->record_real_time);
                         } else {
-                            // If no DTS, use PTS
+                            // 计算当前实际经过的时间（毫秒）
+                            int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
+                            
+                            // 基于实际时间计算PTS/DTS，确保正常速度
                             if (pkt_copy->pts != AV_NOPTS_VALUE) {
-                                pkt_copy->dts = pkt_copy->pts;
+                                // 将实际时间转换为输出时基单位
+                                pkt_copy->pts = av_rescale_q(elapsed_real_time, 
+                                                        (AVRational){1, 1000}, // 毫秒时基
+                                                        out_stream->time_base);
+                                av_log(ffp, AV_LOG_DEBUG, "HEVC packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
+                                    elapsed_real_time, pkt_copy->pts);
+                            }
+                            
+                            // Ensure DTS is strictly increasing
+                            if (pkt_copy->dts != AV_NOPTS_VALUE) {
+                                int64_t new_dts = av_rescale_q(elapsed_real_time, 
+                                                            (AVRational){1, 1000},
+                                                            out_stream->time_base);
                                 
-                                // Ensure DTS is strictly increasing
-                                if (pkt_copy->dts <= ffp->last_video_dts) {
-                                    pkt_copy->dts = ffp->last_video_dts + 1;
-                                    pkt_copy->pts = pkt_copy->dts; // Keep PTS and DTS in sync
+                                // Make sure DTS is strictly greater than the previous one
+                                if (new_dts <= ffp->last_video_dts) {
+                                    new_dts = ffp->last_video_dts + 1;
                                 }
                                 
-                                ffp->last_video_dts = pkt_copy->dts;
+                                pkt_copy->dts = new_dts;
+                                ffp->last_video_dts = new_dts;
+                                
+                                // Ensure PTS is not less than DTS
+                                if (pkt_copy->pts < pkt_copy->dts) {
+                                    pkt_copy->pts = pkt_copy->dts;
+                                }
+                            } else {
+                                // If no DTS, use PTS
+                                if (pkt_copy->pts != AV_NOPTS_VALUE) {
+                                    pkt_copy->dts = pkt_copy->pts;
+                                    
+                                    // Ensure DTS is strictly increasing
+                                    if (pkt_copy->dts <= ffp->last_video_dts) {
+                                        pkt_copy->dts = ffp->last_video_dts + 1;
+                                        pkt_copy->pts = pkt_copy->dts; // Keep PTS and DTS in sync
+                                    }
+                                    
+                                    ffp->last_video_dts = pkt_copy->dts;
+                                }
                             }
-                        }
                         }
                         
                         // 写入文件
@@ -5782,7 +5780,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
                 
                 // 标准视频转码路径
-    AVFrame *frame = av_frame_alloc();
+                AVFrame *frame = av_frame_alloc();
                 if (!frame) {
                     av_log(ffp, AV_LOG_ERROR, "Failed to allocate video frame");
                     pthread_mutex_unlock(&ffp->record_mutex);
@@ -5790,7 +5788,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
 
                 // 解码视频帧
-    int got_frame = 0;
+                int got_frame = 0;
                 av_log(ffp, AV_LOG_DEBUG, "Decoding video packet for recording, size=%d", packet->size);
                 ret = avcodec_decode_video2(is->viddec.avctx, frame, &got_frame, packet);
                 if (ret < 0) {
@@ -5832,7 +5830,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                             av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
                             av_frame_free(&frame);
                             pthread_mutex_unlock(&ffp->record_mutex);
-        return AVERROR(ENOMEM);
+                            return AVERROR(ENOMEM);
                         }
                     }
                     
@@ -6129,7 +6127,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     }
                 }
 
-        if (got_frame) {
+                if (got_frame) {
                     av_log(ffp, AV_LOG_DEBUG, "Got audio frame: samples=%d, format=%d, pts=%"PRId64, 
                            frame->nb_samples, frame->format, frame->pts);
                     
@@ -6206,211 +6204,210 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                             av_log(ffp, AV_LOG_ERROR, "Failed to allocate buffer for resampled frame: %s", av_err2str(ret));
                             av_frame_free(&resampled_frame);
                             av_frame_free(&frame);
-                        av_frame_free(&resampled_frame);
-                        pthread_mutex_unlock(&ffp->record_mutex);
-                        return ret;
-                    }
+                            av_frame_free(&resampled_frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return ret;
+                        }
                     
-                    // 执行重采样
-                    av_log(ffp, AV_LOG_INFO, "Resampling audio frame: in_samples=%d, out_samples=%d, in_fmt=%d, out_fmt=%d, in_ch=%d, out_ch=%d",
-                           frame->nb_samples, dst_nb_samples, frame->format, resampled_frame->format,
-                           frame->channels, resampled_frame->channels);
-                    
-                    // 确保重采样器已正确初始化
-                    if (!ffp->swr_ctx_record) {
-                        av_log(ffp, AV_LOG_ERROR, "Resampler context is NULL");
-                        av_frame_free(&frame);
-                        av_frame_free(&resampled_frame);
-                        pthread_mutex_unlock(&ffp->record_mutex);
-                        return AVERROR(EINVAL);
-                    }
-                    
-                    // 检查输入输出格式是否匹配
-                    if (frame->format == resampled_frame->format &&
-                        frame->sample_rate == resampled_frame->sample_rate &&
-                        frame->channel_layout == resampled_frame->channel_layout &&
-                        frame->nb_samples <= dst_nb_samples) {
+                        // 执行重采样
+                        av_log(ffp, AV_LOG_INFO, "Resampling audio frame: in_samples=%d, out_samples=%d, in_fmt=%d, out_fmt=%d, in_ch=%d, out_ch=%d",
+                            frame->nb_samples, dst_nb_samples, frame->format, resampled_frame->format,
+                            frame->channels, resampled_frame->channels);
                         
-                        // 格式完全匹配，可以直接复制数据
-                        av_log(ffp, AV_LOG_DEBUG, "Audio formats match, performing direct copy");
-                        av_frame_copy(resampled_frame, frame);
-                        ret = frame->nb_samples;
-                                } else {
-                        // 需要重采样
-                        ret = swr_convert(ffp->swr_ctx_record, 
-                                         resampled_frame->data, dst_nb_samples,
-                                         (const uint8_t **)frame->data, frame->nb_samples);
-                    }
-                    
-                    if (ret < 0) {
-                        av_log(ffp, AV_LOG_ERROR, "Failed to resample audio: %s", av_err2str(ret));
-                        av_frame_free(&frame);
-                        av_frame_free(&resampled_frame);
-                        pthread_mutex_unlock(&ffp->record_mutex);
-                        return ret;
-                    }
-                    
-                    av_log(ffp, AV_LOG_DEBUG, "Audio resampling successful, output samples=%d", ret);
-                    
-                    // 设置时间戳
-                    resampled_frame->pts = av_rescale_q(frame->pts, 
-                                                      is->auddec.avctx->time_base,
-                                                      ffp->audio_enc_ctx->time_base);
-                    
-                    // 编码帧
-                    AVPacket enc_pkt;
-                    av_init_packet(&enc_pkt);
-                    enc_pkt.data = NULL;
-                    enc_pkt.size = 0;
-                    
-                    int got_packet = 0;
-                    av_log(ffp, AV_LOG_DEBUG, "Encoding audio frame, pts=%"PRId64, resampled_frame->pts);
-                    ret = avcodec_encode_audio2(ffp->audio_enc_ctx, &enc_pkt, resampled_frame, &got_packet);
-                    
-                    av_frame_free(&frame);
-                    av_frame_free(&resampled_frame);
-                    
-                    if (ret < 0) {
-                        av_log(ffp, AV_LOG_ERROR, "Error encoding audio frame: %s", av_err2str(ret));
-                        pthread_mutex_unlock(&ffp->record_mutex);
-                        return ret;
-                    }
-                    
-                    if (got_packet) {
-                        av_log(ffp, AV_LOG_DEBUG, "Got encoded audio packet, size=%d, pts=%"PRId64, 
-                               enc_pkt.size, enc_pkt.pts);
-                        
-                        // 设置流索引
-                        enc_pkt.stream_index = ffp->out_audio_stream_index;
-                        
-                        // 转换时间戳
-                        av_log(ffp, AV_LOG_DEBUG, "Rescaling audio timestamps, before: pts=%"PRId64", dts=%"PRId64,
-                               enc_pkt.pts, enc_pkt.dts);
-                               
-                        enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
-                                                     ffp->audio_enc_ctx->time_base,
-                                                     ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
-                                                     AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
-                        enc_pkt.dts = av_rescale_q_rnd(enc_pkt.dts,
-                                                     ffp->audio_enc_ctx->time_base,
-                                                     ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
-                                                     AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
-                        enc_pkt.duration = av_rescale_q(enc_pkt.duration,
-                                                      ffp->audio_enc_ctx->time_base,
-                                                      ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base);
-                        
-                        av_log(ffp, AV_LOG_DEBUG, "Rescaled audio timestamps, after: pts=%"PRId64", dts=%"PRId64,
-                               enc_pkt.pts, enc_pkt.dts);
-                        
-                        // 写入文件
-                        av_log(ffp, AV_LOG_DEBUG, "Writing audio packet to file, size=%d", enc_pkt.size);
-                        ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
-                        if (ret < 0) {
-                            av_log(ffp, AV_LOG_ERROR, "Error writing audio frame: %s", av_err2str(ret));
-                        } else {
-                            av_log(ffp, AV_LOG_DEBUG, "Successfully wrote audio packet");
+                        // 确保重采样器已正确初始化
+                        if (!ffp->swr_ctx_record) {
+                            av_log(ffp, AV_LOG_ERROR, "Resampler context is NULL");
+                            av_frame_free(&frame);
+                            av_frame_free(&resampled_frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return AVERROR(EINVAL);
                         }
                         
-                        av_packet_unref(&enc_pkt);
+                        // 检查输入输出格式是否匹配
+                        if (frame->format == resampled_frame->format &&
+                            frame->sample_rate == resampled_frame->sample_rate &&
+                            frame->channel_layout == resampled_frame->channel_layout &&
+                            frame->nb_samples <= dst_nb_samples) {
+                            // 格式完全匹配，可以直接复制数据
+                            av_log(ffp, AV_LOG_DEBUG, "Audio formats match, performing direct copy");
+                            av_frame_copy(resampled_frame, frame);
+                            ret = frame->nb_samples;
+                        } else {
+                            // 需要重采样
+                            ret = swr_convert(ffp->swr_ctx_record, 
+                                            resampled_frame->data, dst_nb_samples,
+                                            (const uint8_t **)frame->data, frame->nb_samples);
+                        }
+                        
+                        if (ret < 0) {
+                            av_log(ffp, AV_LOG_ERROR, "Failed to resample audio: %s", av_err2str(ret));
+                            av_frame_free(&frame);
+                            av_frame_free(&resampled_frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return ret;
+                        }
+                        
+                        av_log(ffp, AV_LOG_DEBUG, "Audio resampling successful, output samples=%d", ret);
+                        
+                        // 设置时间戳
+                        resampled_frame->pts = av_rescale_q(frame->pts, 
+                                                        is->auddec.avctx->time_base,
+                                                        ffp->audio_enc_ctx->time_base);
+                        
+                        // 编码帧
+                        AVPacket enc_pkt;
+                        av_init_packet(&enc_pkt);
+                        enc_pkt.data = NULL;
+                        enc_pkt.size = 0;
+                        
+                        int got_packet = 0;
+                        av_log(ffp, AV_LOG_DEBUG, "Encoding audio frame, pts=%"PRId64, resampled_frame->pts);
+                        ret = avcodec_encode_audio2(ffp->audio_enc_ctx, &enc_pkt, resampled_frame, &got_packet);
+                        
+                        av_frame_free(&frame);
+                        av_frame_free(&resampled_frame);
+                        
+                        if (ret < 0) {
+                            av_log(ffp, AV_LOG_ERROR, "Error encoding audio frame: %s", av_err2str(ret));
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return ret;
+                        }
+                        
+                        if (got_packet) {
+                            av_log(ffp, AV_LOG_DEBUG, "Got encoded audio packet, size=%d, pts=%"PRId64, 
+                                enc_pkt.size, enc_pkt.pts);
+                            
+                            // 设置流索引
+                            enc_pkt.stream_index = ffp->out_audio_stream_index;
+                            
+                            // 转换时间戳
+                            av_log(ffp, AV_LOG_DEBUG, "Rescaling audio timestamps, before: pts=%"PRId64", dts=%"PRId64,
+                                enc_pkt.pts, enc_pkt.dts);
+                                
+                            enc_pkt.pts = av_rescale_q_rnd(enc_pkt.pts,
+                                                        ffp->audio_enc_ctx->time_base,
+                                                        ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
+                                                        AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                            enc_pkt.dts = av_rescale_q_rnd(enc_pkt.dts,
+                                                        ffp->audio_enc_ctx->time_base,
+                                                        ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base,
+                                                        AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX);
+                            enc_pkt.duration = av_rescale_q(enc_pkt.duration,
+                                                        ffp->audio_enc_ctx->time_base,
+                                                        ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->time_base);
+                            
+                            av_log(ffp, AV_LOG_DEBUG, "Rescaled audio timestamps, after: pts=%"PRId64", dts=%"PRId64,
+                                enc_pkt.pts, enc_pkt.dts);
+                            
+                            // 写入文件
+                            av_log(ffp, AV_LOG_DEBUG, "Writing audio packet to file, size=%d", enc_pkt.size);
+                            ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
+                            if (ret < 0) {
+                                av_log(ffp, AV_LOG_ERROR, "Error writing audio frame: %s", av_err2str(ret));
+                            } else {
+                                av_log(ffp, AV_LOG_DEBUG, "Successfully wrote audio packet");
+                            }
+                            
+                            av_packet_unref(&enc_pkt);
+                        } else {
+                            av_log(ffp, AV_LOG_DEBUG, "No packet produced from audio encoding");
+                        }
                     } else {
-                        av_log(ffp, AV_LOG_DEBUG, "No packet produced from audio encoding");
+                        av_log(ffp, AV_LOG_DEBUG, "No frame decoded from audio packet");
+                        av_frame_free(&frame);
                     }
                 } else {
-                    av_log(ffp, AV_LOG_DEBUG, "No frame decoded from audio packet");
-                    av_frame_free(&frame);
+                    av_log(ffp, AV_LOG_DEBUG, "Skipping packet from stream %d (not video or audio)", packet->stream_index);
                 }
             } else {
-                av_log(ffp, AV_LOG_DEBUG, "Skipping packet from stream %d (not video or audio)", packet->stream_index);
-            }
-        } else {
-            // 原有的不需要转码的逻辑
-            av_log(ffp, AV_LOG_DEBUG, "Processing packet without transcoding, stream_index=%d, size=%d", 
-                   packet->stream_index, packet->size);
-
-        AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
-            if (!pkt) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet");
-                pthread_mutex_unlock(&ffp->record_mutex);
-                return AVERROR(ENOMEM);
-            }
-            
-        av_new_packet(pkt, 0);
-        if (0 == av_packet_ref(pkt, packet)) {
-                in_stream  = is->ic->streams[pkt->stream_index];
-                out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
-
-                // 检查是否是视频流
-                int is_video = (pkt->stream_index == is->video_stream);
+                // 原有的不需要转码的逻辑
+                av_log(ffp, AV_LOG_DEBUG, "Processing packet without transcoding, stream_index=%d, size=%d", 
+                    packet->stream_index, packet->size);
+                // 与看直播的 AVPacket分开，不然卡屏
+                AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); 
+                if (!pkt) {
+                    av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet");
+                    pthread_mutex_unlock(&ffp->record_mutex);
+                    return AVERROR(ENOMEM);
+                }
                 
-                // 检查是否有音频流
-                int has_audio = (is->audio_stream >= 0);
+                av_new_packet(pkt, 0);
+                if (0 == av_packet_ref(pkt, packet)) {
+                    in_stream  = is->ic->streams[pkt->stream_index];
+                    out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
 
-                av_log(ffp, AV_LOG_DEBUG, "Original packet: pts=%"PRId64", dts=%"PRId64", is_video=%d, has_audio=%d",
-                       pkt->pts, pkt->dts, is_video, has_audio);
-                
-                if (!ffp->is_first) { 
-                    // 录制的第一帧，时间从0开始
-                ffp->is_first = 1;
-                    ffp->start_pts = pkt->pts;
-                    ffp->start_dts = pkt->dts;
-                pkt->pts = 0;
-                pkt->dts = 0;
-                    av_log(ffp, AV_LOG_DEBUG, "First packet, start_pts=%"PRId64", start_dts=%"PRId64,
-                           ffp->start_pts, ffp->start_dts);
-                } else {
-                    if (has_audio) {
-                        // 有音频流时，按照正常视频速度录制
-                        pkt->pts = abs(pkt->pts - ffp->start_pts);
-                        pkt->dts = abs(pkt->dts - ffp->start_dts);
-                    } else if (is_video) {
-                        // 没有音频流且是视频流时，保留原始时间戳（保持原始倍速）
-                        // 只需要减去起始时间戳，保持相对时间关系
-                        pkt->pts = abs(pkt->pts - ffp->start_pts);
-                        pkt->dts = abs(pkt->dts - ffp->start_dts);
+                    // 检查是否是视频流
+                    int is_video = (pkt->stream_index == is->video_stream);
                         
-                        // 不使用recordTs，使用原始时间戳
+                    // 检查是否有音频流
+                    int has_audio = (is->audio_stream >= 0);
+
+                    av_log(ffp, AV_LOG_DEBUG, "Original packet: pts=%"PRId64", dts=%"PRId64", is_video=%d, has_audio=%d",
+                            pkt->pts, pkt->dts, is_video, has_audio);
+                        
+                    if (!ffp->is_first) { 
+                            // 录制的第一帧，时间从0开始
+                            ffp->is_first = 1;
+                                ffp->start_pts = pkt->pts;
+                                ffp->start_dts = pkt->dts;
+                            pkt->pts = 0;
+                            pkt->dts = 0;
+                            av_log(ffp, AV_LOG_DEBUG, "First packet, start_pts=%"PRId64", start_dts=%"PRId64,
+                                ffp->start_pts, ffp->start_dts);
                     } else {
-                        // 其他类型的流（如字幕等）
-                pkt->pts = abs(pkt->pts - ffp->start_pts);
-                pkt->dts = abs(pkt->dts - ffp->start_dts);
-            }
-                }
+                            if (has_audio) {
+                                // 有音频流时，按照正常视频速度录制
+                                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                                pkt->dts = abs(pkt->dts - ffp->start_dts);
+                            } else if (is_video) {
+                                // 没有音频流且是视频流时，保留原始时间戳（保持原始倍速）
+                                // 只需要减去起始时间戳，保持相对时间关系
+                                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                                pkt->dts = abs(pkt->dts - ffp->start_dts);
+                                // 不使用recordTs，使用原始时间戳
+                            } else {
+                                // 其他类型的流（如字幕等）
+                                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                                pkt->dts = abs(pkt->dts - ffp->start_dts);
+                            }
+                    }
 
-            // 转换PTS/DTS
-                av_log(ffp, AV_LOG_DEBUG, "Rescaling timestamps, before: pts=%"PRId64", dts=%"PRId64,
-                       pkt->pts, pkt->dts);
-                       
-            pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-            pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-            pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                    // 转换PTS/DTS
+                    av_log(ffp, AV_LOG_DEBUG, "Rescaling timestamps, before: pts=%"PRId64", dts=%"PRId64,
+                            pkt->pts, pkt->dts);
+                            
+                    pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+                    pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+                    pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
 
-            pkt->pos = -1;
+                    pkt->pos = -1;
 
-                av_log(ffp, AV_LOG_DEBUG, "Rescaled packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
-                       pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
+                    av_log(ffp, AV_LOG_DEBUG, "Rescaled packet: pts=%"PRId64", dts=%"PRId64", duration=%"PRId64", is_video=%d, has_audio=%d", 
+                            pkt->pts, pkt->dts, pkt->duration, is_video, has_audio);
 
-            // 写入一个AVPacket到输出文件
-                av_log(ffp, AV_LOG_DEBUG, "Writing packet to file, size=%d", pkt->size);
-            if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
-                    av_log(ffp, AV_LOG_ERROR, "Error muxing packet: %s", av_err2str(ret));
+                    // 写入一个AVPacket到输出文件
+                        av_log(ffp, AV_LOG_DEBUG, "Writing packet to file, size=%d", pkt->size);
+                    if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error muxing packet: %s", av_err2str(ret));
+                    } else {
+                        av_log(ffp, AV_LOG_DEBUG, "Successfully wrote packet");
+                    }
+                    av_packet_unref(pkt);
+                    av_free(pkt);
                 } else {
-                    av_log(ffp, AV_LOG_DEBUG, "Successfully wrote packet");
+                    av_log(ffp, AV_LOG_ERROR, "Failed to reference packet");
+                    av_free(pkt);
+                }
             }
-            av_packet_unref(pkt);
-                av_free(pkt);
-            } else {
-                av_log(ffp, AV_LOG_ERROR, "Failed to reference packet");
-                av_free(pkt);
-            }
-        }
         
             pthread_mutex_unlock(&ffp->record_mutex);
+        }
     }
     return ret;
 }
 
 // 初始化转码器
-static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out_stream, enum AVMediaType type) {
+int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out_stream, enum AVMediaType type) {
     int ret = 0;
     AVCodecContext *enc_ctx = NULL;
     AVCodec *encoder = NULL;
@@ -6514,7 +6511,7 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         }
         
         ffp->video_enc_ctx = enc_ctx;
-    }     else if (type == AVMEDIA_TYPE_AUDIO) {
+    } else if (type == AVMEDIA_TYPE_AUDIO) {
         // 检查输入音频编解码器类型，为PCM格式提供更好的转码支持
         int is_pcm = (dec_ctx->codec_id == AV_CODEC_ID_PCM_MULAW || 
                       dec_ctx->codec_id == AV_CODEC_ID_PCM_ALAW ||
@@ -6565,9 +6562,10 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         int i;
         for (i = 0; encoder->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
             if (encoder->sample_fmts[i] == enc_ctx->sample_fmt) {
-                                    break;
-                                }
-                            }
+                break;
+            }
+        }
+        //如果遍历结束也没有支持的编码格式，采用第一个. 
         if (encoder->sample_fmts[i] == AV_SAMPLE_FMT_NONE) {
             // 如果不支持，使用第一个支持的格式
             enc_ctx->sample_fmt = encoder->sample_fmts[0];
@@ -6740,9 +6738,9 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                 goto end;
             }
             
-                // 设置直接视频复制标志
-    ffp->direct_video_copy = 1;
-    av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled");
+            // 设置直接视频复制标志
+            ffp->direct_video_copy = 1;
+            av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled");
             
             // 确保正确设置codec结构体（为了兼容性）
             if (out_stream->codec && in_stream->codec) {
@@ -6753,10 +6751,10 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                 }
             }
             
-                // 设置时间基准
-    out_stream->time_base = in_stream->time_base;
-    av_log(ffp, AV_LOG_INFO, "Video stream time base: %d/%d", 
-           out_stream->time_base.num, out_stream->time_base.den);
+            // 设置时间基准
+            out_stream->time_base = in_stream->time_base;
+            av_log(ffp, AV_LOG_INFO, "Video stream time base: %d/%d", 
+                   out_stream->time_base.num, out_stream->time_base.den);
             
             // 确保设置正确的编解码器标记
             out_stream->codecpar->codec_tag = 0;
@@ -6767,9 +6765,9 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             ffp->out_video_stream_index = out_stream->index;
             av_log(ffp, AV_LOG_DEBUG, "Video output stream index: %d (copy mode)", ffp->out_video_stream_index);
             
-                // 标记为不需要视频转码
-    ffp->direct_video_copy = 1;
-    av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled for transcoding");
+            // 标记为不需要视频转码
+            ffp->direct_video_copy = 1;
+            av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled for transcoding");
             
         } else if (i == is->audio_stream) {
             av_log(ffp, AV_LOG_DEBUG, "Processing audio stream (index %d)", i);
@@ -6941,7 +6939,7 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
             goto end;
         }
-                                } else {
+    } else {
         // 直接复制模式不需要临时帧
         ffp->tmp_frame = NULL;
         av_log(ffp, AV_LOG_DEBUG, "Direct video copy mode, no temporary frame needed");
