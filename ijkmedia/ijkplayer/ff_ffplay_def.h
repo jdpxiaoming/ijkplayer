@@ -602,8 +602,12 @@ typedef struct FFPlayer {
     int64_t start_dts;                  // 开始录制时dts
     int64_t min_record_time;            // 最小录制时间(毫秒)
     int64_t record_start_time;          // 录制开始时间(毫秒)
+    int64_t record_real_time;           // 录制开始的实际时间（毫秒）
     int video_only;                     // 是否只有视频流(无音频)
     int direct_hevc_write;              // 是否直接写入HEVC包(不解码)
+    int direct_video_copy;              // 是否直接复制视频流(不转码)
+    int64_t last_video_dts;             // 上一个视频包的DTS值
+    int64_t last_audio_dts;             // 上一个音频包的DTS值
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;

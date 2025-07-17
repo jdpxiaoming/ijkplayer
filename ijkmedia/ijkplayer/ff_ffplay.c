@@ -2352,12 +2352,12 @@ static int ffplay_video_thread(void *arg)
             is->frame_last_returned_time = av_gettime_relative() / 1000000.0;
 
             ret = av_buffersink_get_frame_flags(filt_out, frame, 0);
-            if (ret < 0) {
-                if (ret == AVERROR_EOF)
+        if (ret < 0) {
+            if (ret == AVERROR_EOF)
                     is->viddec.finished = is->viddec.pkt_serial;
                 ret = 0;
-                break;
-            }
+            break;
+        }
 
             is->frame_last_filter_delay = av_gettime_relative() / 1000000.0 - is->frame_last_returned_time;
             if (fabs(is->frame_last_filter_delay) > AV_NOSYNC_THRESHOLD / 10.0)
@@ -2729,7 +2729,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
             // stream += len;
             // len = 0;
             SDL_AoutFlushAudio(ffp->aout);
-            break;
+        break;
         }
         len1 = is->audio_buf_size - is->audio_buf_index;
         if (len1 > len)
@@ -3588,18 +3588,18 @@ static int read_thread(void *arg)
             if (pb_eof) {
                 if (is->video_stream >= 0)
                     packet_queue_put_nullpacket(&is->videoq, is->video_stream);
-                if (is->audio_stream >= 0)
+    if (is->audio_stream >= 0)
                     packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
                 if (is->subtitle_stream >= 0)
                     packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
                 is->eof = 1;
             }
             if (pb_error) {
-                if (is->video_stream >= 0)
+    if (is->video_stream >= 0)
                     packet_queue_put_nullpacket(&is->videoq, is->video_stream);
                 if (is->audio_stream >= 0)
                     packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
-                if (is->subtitle_stream >= 0)
+    if (is->subtitle_stream >= 0)
                     packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
                 is->eof = 1;
                 ffp->error = pb_error;
@@ -3800,7 +3800,7 @@ fail:
     is->abort_request = true;
     if (is->video_refresh_tid)
         SDL_WaitThread(is->video_refresh_tid, NULL);
-    stream_close(ffp);
+        stream_close(ffp);
     return NULL;
 }
 
@@ -4183,7 +4183,7 @@ void ffp_set_frame_at_time(FFPlayer *ffp, const char *path, int64_t start_time, 
         } else if (definition == SD_IMAGE) {
             ffp->get_img_info->width  = 320;
             ffp->get_img_info->height = 180;
-        } else {
+    } else {
             ffp->get_img_info->width  = 160;
             ffp->get_img_info->height = 90;
         }
@@ -4271,7 +4271,7 @@ int ffp_get_video_codec_info(FFPlayer *ffp, char **codec_info)
     // FIXME: not thread-safe
     if (ffp->video_codec_info) {
         *codec_info = strdup(ffp->video_codec_info);
-    } else {
+   } else {
         *codec_info = NULL;
     }
     return 0;
@@ -4646,7 +4646,7 @@ void ffp_toggle_buffering_l(FFPlayer *ffp, int buffering_on)
         if (is->seek_req) {
             is->seek_buffering = 1;
             ffp_notify_msg2(ffp, FFP_MSG_BUFFERING_START, 1);
-        } else {
+    } else {
             ffp_notify_msg2(ffp, FFP_MSG_BUFFERING_START, 0);
         }
     } else if (!buffering_on && is->buffering_on){
@@ -4656,7 +4656,7 @@ void ffp_toggle_buffering_l(FFPlayer *ffp, int buffering_on)
         if (is->seek_buffering) {
             is->seek_buffering = 0;
             ffp_notify_msg2(ffp, FFP_MSG_BUFFERING_END, 1);
-        } else {
+    } else {
             ffp_notify_msg2(ffp, FFP_MSG_BUFFERING_END, 0);
         }
     }
@@ -4919,7 +4919,7 @@ int ffp_set_stream_selected(FFPlayer *ffp, int stream, int selected)
             case AVMEDIA_TYPE_VIDEO:
                 if (stream != is->video_stream && is->video_stream >= 0)
                     stream_component_close(ffp, is->video_stream);
-                break;
+                        break;
             case AVMEDIA_TYPE_AUDIO:
                 if (stream != is->audio_stream && is->audio_stream >= 0)
                     stream_component_close(ffp, is->audio_stream);
@@ -4933,7 +4933,7 @@ int ffp_set_stream_selected(FFPlayer *ffp, int stream, int selected)
                 return -1;
         }
         return stream_component_open(ffp, stream);
-    } else {
+                    } else {
         switch (codecpar->codec_type) {
             case AVMEDIA_TYPE_VIDEO:
                 if (stream == is->video_stream)
@@ -4982,7 +4982,7 @@ void ffp_set_property_float(FFPlayer *ffp, int id, float value)
     switch (id) {
         case FFP_PROP_FLOAT_PLAYBACK_RATE:
             ffp_set_playback_rate(ffp, value);
-            break;
+                        break;
         case FFP_PROP_FLOAT_PLAYBACK_VOLUME:
             ffp_set_playback_volume(ffp, value);
             break;
@@ -5091,7 +5091,7 @@ void ffp_set_property_int64(FFPlayer *ffp, int id, int64_t value)
             if (ffp) {
                 if (value) {
                     ijkio_manager_will_share_cache_map(ffp->ijkio_manager_ctx);
-                } else {
+            } else {
                     ijkio_manager_did_share_cache_map(ffp->ijkio_manager_ctx);
                 }
             }
@@ -5119,11 +5119,16 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     assert(ffp);
     
     VideoState *is = ffp->is;
+    int ret = 0, i;
     
     ffp->m_ofmt_ctx = NULL;
     ffp->m_ofmt = NULL;
     ffp->is_record = 0;
     ffp->record_error = 0;
+    ffp->is_first = 0;
+    ffp->direct_video_copy = 1; // Enable direct video copy by default
+    ffp->last_video_dts = -1;   // Initialize DTS tracking
+    ffp->last_audio_dts = -1;
     
     if (!file_name || !strlen(file_name)) { // 没有路径
         av_log(ffp, AV_LOG_ERROR, "filename is invalid");
@@ -5141,14 +5146,47 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     }
     
     // 初始化一个用于输出的AVFormatContext结构体
-    avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, "mp4", file_name);
+    ret = avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, "mp4", file_name);
     if (!ffp->m_ofmt_ctx) {
         av_log(ffp, AV_LOG_ERROR, "Could not create output context filename is %s\n", file_name);
         goto end;
     }
     ffp->m_ofmt = ffp->m_ofmt_ctx->oformat;
     
-    for (int i = 0; i < is->ic->nb_streams; i++) {
+    // 初始化记录实际时间的变量
+    ffp->record_real_time = 0;
+    
+    av_log(ffp, AV_LOG_INFO, "Creating output streams for MP4 recording");
+    
+    // 检查是否有PCM音频流
+    int has_pcm_audio = 0;
+    for (i = 0; i < is->ic->nb_streams; i++) {
+        AVStream *in_stream = is->ic->streams[i];
+        if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            enum AVCodecID codec_id = in_stream->codecpar->codec_id;
+            if (codec_id == AV_CODEC_ID_PCM_MULAW || 
+                codec_id == AV_CODEC_ID_PCM_ALAW ||
+                codec_id == AV_CODEC_ID_PCM_S16LE ||
+                codec_id == AV_CODEC_ID_PCM_S16BE ||
+                codec_id == AV_CODEC_ID_PCM_U8) {
+                has_pcm_audio = 1;
+                av_log(ffp, AV_LOG_WARNING, "PCM audio format detected (codec_id=%d), MP4 container requires transcoding", codec_id);
+                break;
+            }
+        }
+    }
+    
+    if (has_pcm_audio) {
+        av_log(ffp, AV_LOG_INFO, "PCM audio detected, using transcoded recording instead of direct recording");
+        
+        // 确保使用转码模式，这会正确处理PCM音频
+        ffp->need_transcode = 1;
+        
+        ret = ffp_start_record_transcode(ffp, file_name);
+        return ret;
+    }
+    
+    for (i = 0; i < is->ic->nb_streams; i++) {
         // 对照输入流创建输出流通道
         AVStream *in_stream = is->ic->streams[i];
         AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, in_stream->codec->codec);
@@ -5158,15 +5196,37 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         }
         
         // 将输入视频/音频的参数拷贝至输出视频/音频的AVCodecContext结构体
-        av_log(ffp, AV_LOG_DEBUG, "in_stream->codec；%@\n", in_stream->codec);
+        av_log(ffp, AV_LOG_DEBUG, "Processing stream %d, codec_type=%d, codec_id=%d", 
+               i, in_stream->codecpar->codec_type, in_stream->codecpar->codec_id);
+               
         if (avcodec_copy_context(out_stream->codec, in_stream->codec) < 0) {
             av_log(ffp, AV_LOG_ERROR, "Failed to copy context from input to output stream codec context\n");
             goto end;
         }
         
+        // 确保正确设置codecpar (对于较新的FFmpeg版本)
+        ret = avcodec_parameters_from_context(out_stream->codecpar, in_stream->codec);
+        if (ret < 0) {
+            av_log(ffp, AV_LOG_ERROR, "Failed to copy context parameters to codecpar\n");
+            goto end;
+        }
+        
         out_stream->codec->codec_tag = 0;
+        out_stream->codecpar->codec_tag = 0; // 让容器选择合适的标签
+        
         if (ffp->m_ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
             out_stream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;
+        }
+        
+        // MP4容器特殊处理 - 确保使用兼容的编解码器
+        if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+            // 如果是不兼容的音频编解码器，应该已经通过上面的转码路径处理
+            if (out_stream->codecpar->codec_id != AV_CODEC_ID_AAC && 
+                out_stream->codecpar->codec_id != AV_CODEC_ID_MP3 &&
+                out_stream->codecpar->codec_id != AV_CODEC_ID_AC3) {
+                av_log(ffp, AV_LOG_WARNING, "Audio codec %d may not be compatible with MP4 container", 
+                       out_stream->codecpar->codec_id);
+            }
         }
     }
     
@@ -5174,22 +5234,34 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     
     // 打开输出文件
     if (!(ffp->m_ofmt->flags & AVFMT_NOFILE)) {
-        if (avio_open(&ffp->m_ofmt_ctx->pb, file_name, AVIO_FLAG_WRITE) < 0) {
-            av_log(ffp, AV_LOG_ERROR, "Could not open output file '%s'", file_name);
+        av_log(ffp, AV_LOG_DEBUG, "Opening output file: %s", file_name);
+        ret = avio_open(&ffp->m_ofmt_ctx->pb, file_name, AVIO_FLAG_WRITE);
+        if (ret < 0) {
+            av_log(ffp, AV_LOG_ERROR, "Could not open output file '%s': %s", file_name, av_err2str(ret));
             goto end;
         }
     }
     
     // 写视频文件头
-    if (avformat_write_header(ffp->m_ofmt_ctx, NULL) < 0) {
-        av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file\n");
+    av_log(ffp, AV_LOG_INFO, "Writing file header");
+    ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
+    if (ret < 0) {
+        av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file: %s\n", av_err2str(ret));
         goto end;
     }
+    av_log(ffp, AV_LOG_INFO, "File header written successfully");
     
     ffp->is_record = 1;
     ffp->record_error = 0;
-    pthread_mutex_init(&ffp->record_mutex, NULL);
+    ffp->need_transcode = 0; // 明确标记为不需要转码的模式
+    // 初始化互斥锁
+    if (pthread_mutex_init(&ffp->record_mutex, NULL) != 0) {
+        av_log(ffp, AV_LOG_ERROR, "Failed to initialize recording mutex");
+        ffp->is_record = 0;
+        goto end;
+    }
     
+    av_log(ffp, AV_LOG_INFO, "Recording started successfully with direct video copy: %d", ffp->direct_video_copy);
     return 0;
 end:
     ffp->record_error = 1;
@@ -5217,7 +5289,8 @@ int ffp_stop_record(FFPlayer *ffp)
             }
         }
         
-        av_log(ffp, AV_LOG_INFO, "Stopping recording...");
+        av_log(ffp, AV_LOG_INFO, "Stopping recording with duration %"PRId64" ms", 
+               av_gettime() / 1000 - ffp->record_start_time);
         
         // 先设置标志位，防止新的数据继续写入
         ffp->is_record = 0;
@@ -5263,7 +5336,7 @@ int ffp_stop_record(FFPlayer *ffp)
                     ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
                     if (ret < 0) {
                         av_log(ffp, AV_LOG_ERROR, "Error writing delayed video frame: %s", av_err2str(ret));
-                    } else {
+        } else {
                         av_log(ffp, AV_LOG_DEBUG, "Successfully wrote delayed video packet");
                     }
                     
@@ -5307,7 +5380,7 @@ int ffp_stop_record(FFPlayer *ffp)
                     ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &enc_pkt);
                     if (ret < 0) {
                         av_log(ffp, AV_LOG_ERROR, "Error writing delayed audio frame: %s", av_err2str(ret));
-                    } else {
+            } else {
                         av_log(ffp, AV_LOG_DEBUG, "Successfully wrote delayed audio packet");
                     }
                     
@@ -5346,6 +5419,7 @@ int ffp_stop_record(FFPlayer *ffp)
                 }
             }
             
+            av_log(ffp, AV_LOG_INFO, "Writing file trailer...");
             int ret = av_write_trailer(ffp->m_ofmt_ctx);
             if (ret < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Error writing trailer: %s", av_err2str(ret));
@@ -5415,7 +5489,7 @@ void ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf)
 {
   ALOGD("=============>start snapshot\n");
 
-  VideoState *is = ffp->is;
+    VideoState *is = ffp->is;
   Frame *vp;
   int i = 0, linesize = 0, pixels = 0;
   uint8_t *src;
@@ -5454,7 +5528,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
         if (packet == NULL) {
             ffp->record_error = 1;
             av_log(ffp, AV_LOG_ERROR, "packet == NULL");
-            return -1;
+        return -1;
         }
 
         pthread_mutex_lock(&ffp->record_mutex);
@@ -5466,6 +5540,147 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                    
             // 检查是否是视频或音频流
             if (packet->stream_index == is->video_stream && ffp->out_video_stream_index >= 0) {
+                // 检查是否使用直接视频流复制模式
+                if (ffp->direct_video_copy) {
+                    av_log(ffp, AV_LOG_DEBUG, "Direct video packet copying mode");
+                    
+                    // 检查输出上下文是否有效
+                    if (!ffp->m_ofmt_ctx) {
+                        av_log(ffp, AV_LOG_ERROR, "Output format context is NULL");
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(EINVAL);
+                    }
+                    
+                    // 检查输出视频流索引是否有效
+                    if (ffp->out_video_stream_index < 0 || 
+                        ffp->out_video_stream_index >= ffp->m_ofmt_ctx->nb_streams) {
+                        av_log(ffp, AV_LOG_ERROR, "Invalid output video stream index: %d", 
+                               ffp->out_video_stream_index);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(EINVAL);
+                    }
+                    
+                    AVPacket *pkt = av_packet_alloc();
+                    if (!pkt) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate packet for direct video copy");
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(ENOMEM);
+                    }
+                    
+                    if (av_packet_ref(pkt, packet) < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Failed to reference packet");
+                        av_packet_free(&pkt);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(ENOMEM);
+                    }
+                    
+                    // 设置流索引
+                    pkt->stream_index = ffp->out_video_stream_index;
+                    
+                    // 检查输入流是否有效
+                    if (packet->stream_index < 0 || packet->stream_index >= is->ic->nb_streams) {
+                        av_log(ffp, AV_LOG_ERROR, "Invalid input stream index: %d", packet->stream_index);
+                        av_packet_unref(pkt);
+                        av_packet_free(&pkt);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(EINVAL);
+                    }
+                    
+                    // 转换时间戳
+                    AVStream *in_stream = is->ic->streams[packet->stream_index];
+                    AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
+                    
+                    if (!in_stream || !out_stream) {
+                        av_log(ffp, AV_LOG_ERROR, "Invalid stream pointers: in_stream=%p, out_stream=%p", 
+                               in_stream, out_stream);
+                        av_packet_unref(pkt);
+                        av_packet_free(&pkt);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(EINVAL);
+                    }
+                    
+                    // Use the global last_video_dts instead of a static variable
+                    
+                    if (!ffp->is_first) {
+                        ffp->is_first = 1;
+                        ffp->start_pts = pkt->pts;
+                        ffp->start_dts = pkt->dts;
+                        ffp->record_real_time = av_gettime_relative() / 1000; // 记录实际开始时间（毫秒）
+                        pkt->pts = 0;
+                        pkt->dts = 0;
+                        ffp->last_video_dts = 0; // Initialize last DTS
+                        av_log(ffp, AV_LOG_INFO, "First video packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
+                               ffp->start_pts, ffp->start_dts, ffp->record_real_time);
+                    } else {
+                        // 计算当前实际经过的时间（毫秒）
+                        int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
+                        
+                        // 基于实际时间计算PTS/DTS，确保正常速度
+                        if (pkt->pts != AV_NOPTS_VALUE) {
+                            // 将实际时间转换为输出时基单位
+                            pkt->pts = av_rescale_q(elapsed_real_time, 
+                                                  (AVRational){1, 1000}, // 毫秒时基
+                                                  out_stream->time_base);
+                            av_log(ffp, AV_LOG_DEBUG, "Video packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
+                                   elapsed_real_time, pkt->pts);
+                        }
+                        
+                        // Ensure DTS is strictly increasing
+                        if (pkt->dts != AV_NOPTS_VALUE) {
+                            int64_t new_dts = av_rescale_q(elapsed_real_time, 
+                                                        (AVRational){1, 1000},
+                                                        out_stream->time_base);
+                            
+                            // Make sure DTS is strictly greater than the previous one
+                            if (new_dts <= ffp->last_video_dts) {
+                                new_dts = ffp->last_video_dts + 1;
+                            }
+                            
+                            pkt->dts = new_dts;
+                            ffp->last_video_dts = new_dts;
+                            
+                            // Ensure PTS is not less than DTS
+                            if (pkt->pts < pkt->dts) {
+                                pkt->pts = pkt->dts;
+                            }
+                        } else {
+                            // If no DTS, use PTS
+                            if (pkt->pts != AV_NOPTS_VALUE) {
+                                pkt->dts = pkt->pts;
+                                
+                                // Ensure DTS is strictly increasing
+                                if (pkt->dts <= ffp->last_video_dts) {
+                                    pkt->dts = ffp->last_video_dts + 1;
+                                    pkt->pts = pkt->dts; // Keep PTS and DTS in sync
+                                }
+                                
+                                ffp->last_video_dts = pkt->dts;
+                            }
+                        }
+                    }
+                    
+                    pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                    pkt->pos = -1;
+                    
+                    // 写入文件
+                    av_log(ffp, AV_LOG_INFO, "Writing video packet directly, size=%d, pts=%"PRId64", dts=%"PRId64", tb=%d/%d",
+                           pkt->size, pkt->pts, pkt->dts, 
+                           ffp->m_ofmt_ctx->streams[pkt->stream_index]->time_base.num,
+                           ffp->m_ofmt_ctx->streams[pkt->stream_index]->time_base.den);
+                    ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error writing video packet: %s", av_err2str(ret));
+                    } else {
+                        av_log(ffp, AV_LOG_INFO, "Successfully wrote video packet of size %d", pkt->size);
+                    }
+                    
+                    av_packet_unref(pkt);
+                    av_packet_free(&pkt);
+                    
+                    pthread_mutex_unlock(&ffp->record_mutex);
+                    return ret;
+                }
+                
                 // 检查是否是HEVC视频，如果是，可以直接写入包而不尝试解码
                 int is_hevc = (is->viddec.avctx && is->viddec.avctx->codec_id == AV_CODEC_ID_HEVC);
                 
@@ -5489,21 +5704,64 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         AVStream *in_stream = is->ic->streams[packet->stream_index];
                         AVStream *out_stream = ffp->m_ofmt_ctx->streams[ffp->out_video_stream_index];
                         
-                        if (!ffp->is_first) {
-                            ffp->is_first = 1;
-                            ffp->start_pts = pkt_copy->pts;
-                            ffp->start_dts = pkt_copy->dts;
-                            pkt_copy->pts = 0;
-                            pkt_copy->dts = 0;
+                                                                // Use the global last_video_dts for HEVC packets as well
+                    
+                    if (!ffp->is_first) {
+                        ffp->is_first = 1;
+                        ffp->start_pts = pkt_copy->pts;
+                        ffp->start_dts = pkt_copy->dts;
+                        ffp->record_real_time = av_gettime_relative() / 1000; // 记录实际开始时间（毫秒）
+                        pkt_copy->pts = 0;
+                        pkt_copy->dts = 0;
+                        ffp->last_video_dts = 0; // Initialize last DTS
+                        av_log(ffp, AV_LOG_INFO, "First HEVC packet: pts=%"PRId64", dts=%"PRId64", real_time=%"PRId64,
+                               ffp->start_pts, ffp->start_dts, ffp->record_real_time);
+                    } else {
+                        // 计算当前实际经过的时间（毫秒）
+                        int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
+                        
+                        // 基于实际时间计算PTS/DTS，确保正常速度
+                        if (pkt_copy->pts != AV_NOPTS_VALUE) {
+                            // 将实际时间转换为输出时基单位
+                            pkt_copy->pts = av_rescale_q(elapsed_real_time, 
+                                                      (AVRational){1, 1000}, // 毫秒时基
+                                                      out_stream->time_base);
+                            av_log(ffp, AV_LOG_DEBUG, "HEVC packet: real_time=%"PRId64"ms, new_pts=%"PRId64, 
+                                   elapsed_real_time, pkt_copy->pts);
+                        }
+                        
+                        // Ensure DTS is strictly increasing
+                        if (pkt_copy->dts != AV_NOPTS_VALUE) {
+                            int64_t new_dts = av_rescale_q(elapsed_real_time, 
+                                                        (AVRational){1, 1000},
+                                                        out_stream->time_base);
+                            
+                            // Make sure DTS is strictly greater than the previous one
+                            if (new_dts <= ffp->last_video_dts) {
+                                new_dts = ffp->last_video_dts + 1;
+                            }
+                            
+                            pkt_copy->dts = new_dts;
+                            ffp->last_video_dts = new_dts;
+                            
+                            // Ensure PTS is not less than DTS
+                            if (pkt_copy->pts < pkt_copy->dts) {
+                                pkt_copy->pts = pkt_copy->dts;
+                            }
                         } else {
-                            if (pkt_copy->pts != AV_NOPTS_VALUE)
-                                pkt_copy->pts = av_rescale_q(pkt_copy->pts - ffp->start_pts,
-                                                           in_stream->time_base,
-                                                           out_stream->time_base);
-                            if (pkt_copy->dts != AV_NOPTS_VALUE)
-                                pkt_copy->dts = av_rescale_q(pkt_copy->dts - ffp->start_dts,
-                                                           in_stream->time_base,
-                                                           out_stream->time_base);
+                            // If no DTS, use PTS
+                            if (pkt_copy->pts != AV_NOPTS_VALUE) {
+                                pkt_copy->dts = pkt_copy->pts;
+                                
+                                // Ensure DTS is strictly increasing
+                                if (pkt_copy->dts <= ffp->last_video_dts) {
+                                    pkt_copy->dts = ffp->last_video_dts + 1;
+                                    pkt_copy->pts = pkt_copy->dts; // Keep PTS and DTS in sync
+                                }
+                                
+                                ffp->last_video_dts = pkt_copy->dts;
+                            }
+                        }
                         }
                         
                         // 写入文件
@@ -5524,7 +5782,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
                 
                 // 标准视频转码路径
-                AVFrame *frame = av_frame_alloc();
+    AVFrame *frame = av_frame_alloc();
                 if (!frame) {
                     av_log(ffp, AV_LOG_ERROR, "Failed to allocate video frame");
                     pthread_mutex_unlock(&ffp->record_mutex);
@@ -5532,7 +5790,7 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
 
                 // 解码视频帧
-                int got_frame = 0;
+    int got_frame = 0;
                 av_log(ffp, AV_LOG_DEBUG, "Decoding video packet for recording, size=%d", packet->size);
                 ret = avcodec_decode_video2(is->viddec.avctx, frame, &got_frame, packet);
                 if (ret < 0) {
@@ -5550,12 +5808,34 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                     if (!ffp->is_first) {
                         ffp->is_first = 1;
                         ffp->start_pts = frame->pts;
+                        ffp->record_real_time = av_gettime_relative() / 1000; // 记录实际开始时间（毫秒）
                         frame->pts = 0;
-                        av_log(ffp, AV_LOG_DEBUG, "First video frame, start_pts=%"PRId64, ffp->start_pts);
+                        av_log(ffp, AV_LOG_DEBUG, "First video frame, start_pts=%"PRId64", real_time=%"PRId64, 
+                               ffp->start_pts, ffp->record_real_time);
                     } else {
-                        frame->pts = abs(frame->pts - ffp->start_pts);
+                        // 计算当前实际经过的时间（毫秒）
+                        int64_t elapsed_real_time = av_gettime_relative() / 1000 - ffp->record_real_time;
+                        
+                        // 基于实际时间计算PTS，确保正常速度
+                        frame->pts = av_rescale_q(elapsed_real_time, 
+                                                (AVRational){1, 1000}, // 毫秒时基
+                                                ffp->video_enc_ctx->time_base);
+                        
+                        av_log(ffp, AV_LOG_DEBUG, "Video frame: real_time=%"PRId64"ms, new_pts=%"PRId64, 
+                               elapsed_real_time, frame->pts);
                     }
 
+                    // 确保tmp_frame已经分配
+                    if (!ffp->tmp_frame) {
+                        ffp->tmp_frame = av_frame_alloc();
+                        if (!ffp->tmp_frame) {
+                            av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
+                            av_frame_free(&frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+        return AVERROR(ENOMEM);
+                        }
+                    }
+                    
                     // 转换像素格式
                     av_image_fill_arrays(ffp->tmp_frame->data, ffp->tmp_frame->linesize,
                                         NULL, AV_PIX_FMT_YUV420P,
@@ -5735,6 +6015,29 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 }
             } else if (packet->stream_index == is->audio_stream && ffp->out_audio_stream_index >= 0) {
                 // 音频转码
+                // 检查是否是PCM音频，需要特殊处理
+                int is_pcm = 0;
+                if (is->auddec.avctx) {
+                    enum AVCodecID codec_id = is->auddec.avctx->codec_id;
+                    is_pcm = (codec_id == AV_CODEC_ID_PCM_MULAW || 
+                              codec_id == AV_CODEC_ID_PCM_ALAW ||
+                              codec_id == AV_CODEC_ID_PCM_S16LE ||
+                              codec_id == AV_CODEC_ID_PCM_S16BE ||
+                              codec_id == AV_CODEC_ID_PCM_U8);
+                }
+                
+                if (is_pcm && strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+                    av_log(ffp, AV_LOG_INFO, "Handling PCM to AAC conversion for MP4 container (codec_id=%d)",
+                          is->auddec.avctx ? is->auddec.avctx->codec_id : -1);
+                    
+                    // 确保输出流标记为AAC
+                    ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->codecpar->codec_id = AV_CODEC_ID_AAC;
+                    if (ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->codec) {
+                        ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->codec->codec_id = AV_CODEC_ID_AAC;
+                        ffp->m_ofmt_ctx->streams[ffp->out_audio_stream_index]->codec->codec_tag = 0;
+                    }
+                }
+                
                 AVFrame *frame = av_frame_alloc();
                 if (!frame) {
                     av_log(ffp, AV_LOG_ERROR, "Failed to allocate audio frame");
@@ -5745,15 +6048,88 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                 // 解码音频帧
                 int got_frame = 0;
                 av_log(ffp, AV_LOG_DEBUG, "Decoding audio packet for recording, size=%d", packet->size);
-                ret = avcodec_decode_audio4(is->auddec.avctx, frame, &got_frame, packet);
-                if (ret < 0) {
-                    av_log(ffp, AV_LOG_ERROR, "Error decoding audio frame: %s", av_err2str(ret));
-                    av_frame_free(&frame);
-                    pthread_mutex_unlock(&ffp->record_mutex);
-                    return ret;
+                
+                // 对于PCM音频，直接复制数据而不解码
+                if (is->auddec.avctx && 
+                   (is->auddec.avctx->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                    is->auddec.avctx->codec_id == AV_CODEC_ID_PCM_ALAW ||
+                    is->auddec.avctx->codec_id == AV_CODEC_ID_PCM_S16LE ||
+                    is->auddec.avctx->codec_id == AV_CODEC_ID_PCM_S16BE ||
+                    is->auddec.avctx->codec_id == AV_CODEC_ID_PCM_U8)) {
+                    
+                    av_log(ffp, AV_LOG_INFO, "PCM audio detected, using direct frame creation instead of decoding");
+                    
+                    // 为PCM数据创建一个新帧
+                    int sample_size = av_get_bytes_per_sample(is->auddec.avctx->sample_fmt);
+                    int num_samples = packet->size / (sample_size * is->auddec.avctx->channels);
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "Creating PCM frame: sample_size=%d, channels=%d, num_samples=%d", 
+                           sample_size, is->auddec.avctx->channels, num_samples);
+                    
+                    // 设置帧属性
+                    frame->format = is->auddec.avctx->sample_fmt;
+                    frame->channel_layout = is->auddec.avctx->channel_layout;
+                    if (!frame->channel_layout) {
+                        frame->channel_layout = av_get_default_channel_layout(is->auddec.avctx->channels);
+                    }
+                    frame->channels = is->auddec.avctx->channels;
+                    frame->sample_rate = is->auddec.avctx->sample_rate;
+                    frame->nb_samples = num_samples;
+                    
+                    // 分配帧缓冲区
+                    ret = av_frame_get_buffer(frame, 0);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Could not allocate frame data: %s", av_err2str(ret));
+                        av_frame_free(&frame);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    }
+                    
+                    // 确保帧数据可写
+                    ret = av_frame_make_writable(frame);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Could not make frame writable: %s", av_err2str(ret));
+                        av_frame_free(&frame);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    }
+                    
+                    // 复制数据到帧
+                    memcpy(frame->data[0], packet->data, packet->size);
+                    
+                    // 设置时间戳
+                    frame->pts = packet->pts;
+                    got_frame = 1;
+                    
+                    av_log(ffp, AV_LOG_DEBUG, "Successfully created PCM frame with %d samples", frame->nb_samples);
+                } else {
+                    // 使用send/receive API代替已弃用的avcodec_decode_audio4
+                    ret = avcodec_send_packet(is->auddec.avctx, packet);
+                    if (ret < 0) {
+                        av_log(ffp, AV_LOG_ERROR, "Error sending packet for decoding: %s", av_err2str(ret));
+                        av_frame_free(&frame);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    }
+                    
+                    ret = avcodec_receive_frame(is->auddec.avctx, frame);
+                    if (ret == 0) {
+                        got_frame = 1;
+                        av_log(ffp, AV_LOG_DEBUG, "Successfully decoded audio frame with %d samples", frame->nb_samples);
+                    } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+                        // 需要更多输入数据或者已到达文件末尾
+                        got_frame = 0;
+                        ret = 0;
+                        av_log(ffp, AV_LOG_DEBUG, "Need more input data for audio decoding");
+                    } else {
+                        av_log(ffp, AV_LOG_ERROR, "Error receiving audio frame: %s", av_err2str(ret));
+                        av_frame_free(&frame);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return ret;
+                    }
                 }
 
-                if (got_frame) {
+        if (got_frame) {
                     av_log(ffp, AV_LOG_DEBUG, "Got audio frame: samples=%d, format=%d, pts=%"PRId64, 
                            frame->nb_samples, frame->format, frame->pts);
                     
@@ -5767,40 +6143,105 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
                         frame->pts = abs(frame->pts - ffp->start_pts);
                     }
 
-                    // 重采样
-                    int dst_nb_samples = av_rescale_rnd(swr_get_delay(ffp->swr_ctx_record, frame->sample_rate) + frame->nb_samples,
-                                                      ffp->audio_enc_ctx->sample_rate, frame->sample_rate, AV_ROUND_UP);
+                    // 检查是否需要重采样
+                    int do_resample = 0;
                     
-                    av_log(ffp, AV_LOG_DEBUG, "Resampling audio: in_rate=%d, out_rate=%d, dst_samples=%d", 
-                           frame->sample_rate, ffp->audio_enc_ctx->sample_rate, dst_nb_samples);
-                    
-                    // 分配临时帧
-                    AVFrame *resampled_frame = av_frame_alloc();
-                    if (!resampled_frame) {
-                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate resampled frame");
-                        av_frame_free(&frame);
-                        pthread_mutex_unlock(&ffp->record_mutex);
-                        return AVERROR(ENOMEM);
+                    // 如果采样率、通道数或格式不同，需要重采样
+                    if (frame->sample_rate != ffp->audio_enc_ctx->sample_rate ||
+                        frame->format != ffp->audio_enc_ctx->sample_fmt ||
+                        frame->channel_layout != ffp->audio_enc_ctx->channel_layout) {
+                        do_resample = 1;
                     }
                     
-                    resampled_frame->format = ffp->audio_enc_ctx->sample_fmt;
-                    resampled_frame->channel_layout = ffp->audio_enc_ctx->channel_layout;
-                    resampled_frame->sample_rate = ffp->audio_enc_ctx->sample_rate;
-                    resampled_frame->nb_samples = dst_nb_samples;
+                    // 如果不需要重采样，直接使用原始帧
+                    AVFrame *resampled_frame;
+                    int dst_nb_samples = 0;
                     
-                    ret = av_frame_get_buffer(resampled_frame, 0);
-                    if (ret < 0) {
-                        av_log(ffp, AV_LOG_ERROR, "Failed to allocate buffer for resampled frame: %s", av_err2str(ret));
-                        av_frame_free(&frame);
+                    if (do_resample) {
+                        // 确保重采样上下文存在
+                        if (!ffp->swr_ctx_record) {
+                            av_log(ffp, AV_LOG_ERROR, "Resampler context not initialized");
+                            av_frame_free(&frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return AVERROR(EINVAL);
+                        }
+                        
+                        // 计算目标采样数
+                        dst_nb_samples = av_rescale_rnd(
+                            swr_get_delay(ffp->swr_ctx_record, frame->sample_rate) + frame->nb_samples,
+                            ffp->audio_enc_ctx->sample_rate, 
+                            frame->sample_rate, 
+                            AV_ROUND_UP);
+                        
+                        av_log(ffp, AV_LOG_DEBUG, "Resampling audio: in_rate=%d, out_rate=%d, in_format=%d, out_format=%d, dst_samples=%d", 
+                               frame->sample_rate, ffp->audio_enc_ctx->sample_rate, 
+                               frame->format, ffp->audio_enc_ctx->sample_fmt, dst_nb_samples);
+                        
+                        // 分配临时帧
+                        resampled_frame = av_frame_alloc();
+                        if (!resampled_frame) {
+                            av_log(ffp, AV_LOG_ERROR, "Failed to allocate resampled frame");
+                            av_frame_free(&frame);
+                            pthread_mutex_unlock(&ffp->record_mutex);
+                            return AVERROR(ENOMEM);
+                        }
+                    } else {
+                        // 不需要重采样，直接使用原始帧
+                        av_log(ffp, AV_LOG_DEBUG, "No resampling needed, using original frame");
+                        resampled_frame = frame;
+                        dst_nb_samples = frame->nb_samples;
+                    }
+                    
+                    // 如果需要重采样，设置重采样帧属性并执行重采样
+                    if (do_resample) {
+                        // 设置重采样帧属性
+                        resampled_frame->format = ffp->audio_enc_ctx->sample_fmt;
+                        resampled_frame->channel_layout = ffp->audio_enc_ctx->channel_layout;
+                        resampled_frame->sample_rate = ffp->audio_enc_ctx->sample_rate;
+                        resampled_frame->nb_samples = dst_nb_samples;
+                        
+                        // 分配重采样帧缓冲区
+                        ret = av_frame_get_buffer(resampled_frame, 0);
+                        if (ret < 0) {
+                            av_log(ffp, AV_LOG_ERROR, "Failed to allocate buffer for resampled frame: %s", av_err2str(ret));
+                            av_frame_free(&resampled_frame);
+                            av_frame_free(&frame);
                         av_frame_free(&resampled_frame);
                         pthread_mutex_unlock(&ffp->record_mutex);
                         return ret;
                     }
                     
                     // 执行重采样
-                    ret = swr_convert(ffp->swr_ctx_record, 
-                                     resampled_frame->data, dst_nb_samples,
-                                     (const uint8_t **)frame->data, frame->nb_samples);
+                    av_log(ffp, AV_LOG_INFO, "Resampling audio frame: in_samples=%d, out_samples=%d, in_fmt=%d, out_fmt=%d, in_ch=%d, out_ch=%d",
+                           frame->nb_samples, dst_nb_samples, frame->format, resampled_frame->format,
+                           frame->channels, resampled_frame->channels);
+                    
+                    // 确保重采样器已正确初始化
+                    if (!ffp->swr_ctx_record) {
+                        av_log(ffp, AV_LOG_ERROR, "Resampler context is NULL");
+                        av_frame_free(&frame);
+                        av_frame_free(&resampled_frame);
+                        pthread_mutex_unlock(&ffp->record_mutex);
+                        return AVERROR(EINVAL);
+                    }
+                    
+                    // 检查输入输出格式是否匹配
+                    if (frame->format == resampled_frame->format &&
+                        frame->sample_rate == resampled_frame->sample_rate &&
+                        frame->channel_layout == resampled_frame->channel_layout &&
+                        frame->nb_samples <= dst_nb_samples) {
+                        
+                        // 格式完全匹配，可以直接复制数据
+                        av_log(ffp, AV_LOG_DEBUG, "Audio formats match, performing direct copy");
+                        av_frame_copy(resampled_frame, frame);
+                        ret = frame->nb_samples;
+                                } else {
+                        // 需要重采样
+                        ret = swr_convert(ffp->swr_ctx_record, 
+                                         resampled_frame->data, dst_nb_samples,
+                                         (const uint8_t **)frame->data, frame->nb_samples);
+                    }
+                    
                     if (ret < 0) {
                         av_log(ffp, AV_LOG_ERROR, "Failed to resample audio: %s", av_err2str(ret));
                         av_frame_free(&frame);
@@ -6073,14 +6514,23 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         }
         
         ffp->video_enc_ctx = enc_ctx;
-    } else if (type == AVMEDIA_TYPE_AUDIO) {
+    }     else if (type == AVMEDIA_TYPE_AUDIO) {
+        // 检查输入音频编解码器类型，为PCM格式提供更好的转码支持
+        int is_pcm = (dec_ctx->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                      dec_ctx->codec_id == AV_CODEC_ID_PCM_ALAW ||
+                      dec_ctx->codec_id == AV_CODEC_ID_PCM_S16LE ||
+                      dec_ctx->codec_id == AV_CODEC_ID_PCM_S16BE ||
+                      dec_ctx->codec_id == AV_CODEC_ID_PCM_U8);
+        
+        // 对于MP4容器，必须转换为AAC，因为MP4不支持许多音频格式（如PCM mu-law）
         encoder = avcodec_find_encoder(AV_CODEC_ID_AAC);
         if (!encoder) {
             av_log(ffp, AV_LOG_ERROR, "Cannot find AAC audio encoder");
             return AVERROR_ENCODER_NOT_FOUND;
         }
         
-        av_log(ffp, AV_LOG_DEBUG, "Using audio encoder: %s", encoder->name);
+        av_log(ffp, AV_LOG_INFO, "Converting audio to AAC for MP4 compatibility (original codec_id: %d, is_pcm: %d)", 
+               dec_ctx->codec_id, is_pcm);
         
         enc_ctx = avcodec_alloc_context3(encoder);
         if (!enc_ctx) {
@@ -6090,6 +6540,16 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         
         // 设置音频编码参数
         enc_ctx->sample_rate = dec_ctx->sample_rate;
+        
+        // PCM音频格式可能需要特殊处理
+        if (is_pcm) {
+            // 记录原始PCM格式信息，帮助调试
+            av_log(ffp, AV_LOG_INFO, "PCM audio: codec=%s, channels=%d, sample_rate=%d, sample_fmt=%d",
+                   avcodec_get_name(dec_ctx->codec_id),
+                   dec_ctx->channels,
+                   dec_ctx->sample_rate,
+                   dec_ctx->sample_fmt);
+        }
         
         // 确保通道布局有效
         enc_ctx->channel_layout = dec_ctx->channel_layout;
@@ -6105,9 +6565,9 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         int i;
         for (i = 0; encoder->sample_fmts[i] != AV_SAMPLE_FMT_NONE; i++) {
             if (encoder->sample_fmts[i] == enc_ctx->sample_fmt) {
-                break;
-            }
-        }
+                                    break;
+                                }
+                            }
         if (encoder->sample_fmts[i] == AV_SAMPLE_FMT_NONE) {
             // 如果不支持，使用第一个支持的格式
             enc_ctx->sample_fmt = encoder->sample_fmts[0];
@@ -6121,8 +6581,19 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         // 设置编码器特定选项
         av_dict_set(&opts, "strict", "experimental", 0);  // 允许实验性AAC编码器
         
+        // 为PCM音频特别设置
+        if (dec_ctx->codec_id == AV_CODEC_ID_PCM_MULAW || 
+            dec_ctx->codec_id == AV_CODEC_ID_PCM_ALAW ||
+            dec_ctx->codec_id == AV_CODEC_ID_PCM_S16LE ||
+            dec_ctx->codec_id == AV_CODEC_ID_PCM_S16BE ||
+            dec_ctx->codec_id == AV_CODEC_ID_PCM_U8) {
+            av_log(ffp, AV_LOG_INFO, "Setting special AAC encoding options for PCM audio");
+            av_dict_set(&opts, "profile", "aac_low", 0);  // 使用AAC-LC配置文件
+            av_dict_set(&opts, "b", "128k", 0);           // 设置比特率
+        }
+        
         ffp->audio_enc_ctx = enc_ctx;
-    } else {
+     } else {
         return AVERROR(EINVAL);
     }
     
@@ -6154,14 +6625,31 @@ static int init_transcoder(FFPlayer *ffp, AVCodecContext *dec_ctx, AVStream *out
         return ret;
     }
     
+    // 明确设置codecpar的codec_tag为0，让容器自己选择合适的标签
+    out_stream->codecpar->codec_tag = 0;
+    
+    // 对于音频，确保MP4容器中始终使用AAC
+    if (type == AVMEDIA_TYPE_AUDIO && ffp->m_ofmt && strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+        out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+        av_log(ffp, AV_LOG_INFO, "Forcing AAC codec for audio stream in MP4 container");
+    }
+    
     out_stream->time_base = enc_ctx->time_base;
     
-    av_log(ffp, AV_LOG_INFO, "Transcoder initialized for %s: %dx%d, %d channels, %d Hz", 
+    // 确保MP4的音频流使用正确的编解码器标签
+    if (type == AVMEDIA_TYPE_AUDIO && ffp->m_ofmt && strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+        // 强制设置AAC编解码器ID，确保正确使用AAC标签
+        out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+        av_log(ffp, AV_LOG_INFO, "Forced AAC codec ID for MP4 container compatibility");
+    }
+    
+    av_log(ffp, AV_LOG_INFO, "Transcoder initialized for %s: %dx%d, %d channels, %d Hz, codec=%d", 
            type == AVMEDIA_TYPE_VIDEO ? "video" : "audio",
            type == AVMEDIA_TYPE_VIDEO ? enc_ctx->width : 0,
            type == AVMEDIA_TYPE_VIDEO ? enc_ctx->height : 0,
            type == AVMEDIA_TYPE_AUDIO ? enc_ctx->channels : 0,
-           type == AVMEDIA_TYPE_AUDIO ? enc_ctx->sample_rate : 0);
+           type == AVMEDIA_TYPE_AUDIO ? enc_ctx->sample_rate : 0,
+           out_stream->codecpar->codec_id);
     
     return 0;
 }
@@ -6242,26 +6730,46 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                 goto end;
             }
             
-            av_log(ffp, AV_LOG_DEBUG, "Initializing video transcoder");
-            ret = init_transcoder(ffp, dec_ctx, out_stream, AVMEDIA_TYPE_VIDEO);
+            // 直接复制视频流，不进行转码
+            av_log(ffp, AV_LOG_INFO, "Using video stream copy (no transcoding)");
+            
+            // 复制编解码器参数
+            ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
             if (ret < 0) {
-                av_log(ffp, AV_LOG_ERROR, "Failed to initialize video transcoder: %s", av_err2str(ret));
+                av_log(ffp, AV_LOG_ERROR, "Failed to copy video codec parameters: %s", av_err2str(ret));
                 goto end;
+            }
+            
+                // 设置直接视频复制标志
+    ffp->direct_video_copy = 1;
+    av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled");
+            
+            // 确保正确设置codec结构体（为了兼容性）
+            if (out_stream->codec && in_stream->codec) {
+                ret = avcodec_copy_context(out_stream->codec, in_stream->codec);
+                if (ret < 0) {
+                    av_log(ffp, AV_LOG_WARNING, "Failed to copy video codec context: %s", av_err2str(ret));
+                    // 继续执行，因为codecpar已经设置好了
+                }
+            }
+            
+                // 设置时间基准
+    out_stream->time_base = in_stream->time_base;
+    av_log(ffp, AV_LOG_INFO, "Video stream time base: %d/%d", 
+           out_stream->time_base.num, out_stream->time_base.den);
+            
+            // 确保设置正确的编解码器标记
+            out_stream->codecpar->codec_tag = 0;
+            if (out_stream->codec) {
+                out_stream->codec->codec_tag = 0;
             }
             
             ffp->out_video_stream_index = out_stream->index;
-            av_log(ffp, AV_LOG_DEBUG, "Video output stream index: %d", ffp->out_video_stream_index);
+            av_log(ffp, AV_LOG_DEBUG, "Video output stream index: %d (copy mode)", ffp->out_video_stream_index);
             
-            // 创建视频格式转换上下文
-            av_log(ffp, AV_LOG_DEBUG, "Creating video format converter (swscale)");
-            ffp->sws_ctx = sws_getContext(
-                dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt,
-                dec_ctx->width, dec_ctx->height, AV_PIX_FMT_YUV420P,
-                SWS_BICUBIC, NULL, NULL, NULL);
-            if (!ffp->sws_ctx) {
-                av_log(ffp, AV_LOG_ERROR, "Could not initialize the video conversion context");
-                goto end;
-            }
+                // 标记为不需要视频转码
+    ffp->direct_video_copy = 1;
+    av_log(ffp, AV_LOG_INFO, "Direct video copy mode enabled for transcoding");
             
         } else if (i == is->audio_stream) {
             av_log(ffp, AV_LOG_DEBUG, "Processing audio stream (index %d)", i);
@@ -6273,6 +6781,12 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             
             av_log(ffp, AV_LOG_DEBUG, "Audio decoder: channels=%d, rate=%d, format=%d, codec=%d", 
                    dec_ctx->channels, dec_ctx->sample_rate, dec_ctx->sample_fmt, dec_ctx->codec_id);
+                   
+            // 检查音频编解码器，MP4容器只支持特定的编解码器，例如AAC
+            if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+                av_log(ffp, AV_LOG_INFO, "MP4 container detected, forcing AAC audio codec for compatibility");
+                // 无条件强制使用AAC编码器，解决格式兼容性问题
+            }
             
             AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, NULL);
             if (!out_stream) {
@@ -6281,6 +6795,25 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             }
             
             av_log(ffp, AV_LOG_DEBUG, "Initializing audio transcoder");
+            
+            // 对于MP4容器，强制使用AAC
+            if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+                av_log(ffp, AV_LOG_INFO, "MP4 container: forcing AAC audio codec (original: %s)", 
+                       avcodec_get_name(dec_ctx->codec_id));
+                
+                // 设置输出流编解码器参数为AAC，确保正确的编解码器标签
+                out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+                out_stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+                out_stream->codecpar->codec_tag = 0; // 让容器自动选择适合的tag
+                
+                // 将参数复制到codec结构体（为了兼容性）
+                if (out_stream->codec) {
+                    out_stream->codec->codec_id = AV_CODEC_ID_AAC;
+                    out_stream->codec->codec_type = AVMEDIA_TYPE_AUDIO;
+                    out_stream->codec->codec_tag = 0;
+                }
+            }
+            
             ret = init_transcoder(ffp, dec_ctx, out_stream, AVMEDIA_TYPE_AUDIO);
             if (ret < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Failed to initialize audio transcoder: %s", av_err2str(ret));
@@ -6310,11 +6843,56 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
             av_opt_set_int(ffp->swr_ctx_record, "out_sample_rate", ffp->audio_enc_ctx->sample_rate, 0);
             av_opt_set_sample_fmt(ffp->swr_ctx_record, "out_sample_fmt", ffp->audio_enc_ctx->sample_fmt, 0);
             
+            // 增强对特殊音频格式的支持
+            if (dec_ctx->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                dec_ctx->codec_id == AV_CODEC_ID_PCM_ALAW ||
+                dec_ctx->codec_id == AV_CODEC_ID_PCM_S16LE ||
+                dec_ctx->codec_id == AV_CODEC_ID_PCM_S16BE ||
+                dec_ctx->codec_id == AV_CODEC_ID_PCM_U8) {
+                av_log(ffp, AV_LOG_INFO, "Setting special resampling options for PCM audio format (codec_id=%d)",
+                      dec_ctx->codec_id);
+                
+                // 完全重新配置重采样器以确保正确处理PCM格式
+                swr_free(&ffp->swr_ctx_record);
+                ffp->swr_ctx_record = swr_alloc();
+                if (!ffp->swr_ctx_record) {
+                    av_log(ffp, AV_LOG_ERROR, "Could not reallocate audio resampler context");
+                    goto end;
+                }
+                
+                // 使用更明确的参数设置，确保正确转换
+                av_opt_set_int(ffp->swr_ctx_record, "ich", dec_ctx->channels, 0);
+                av_opt_set_int(ffp->swr_ctx_record, "och", ffp->audio_enc_ctx->channels, 0);
+                av_opt_set_int(ffp->swr_ctx_record, "isr", dec_ctx->sample_rate, 0);
+                av_opt_set_int(ffp->swr_ctx_record, "osr", ffp->audio_enc_ctx->sample_rate, 0);
+                av_opt_set_sample_fmt(ffp->swr_ctx_record, "isf", dec_ctx->sample_fmt, 0);
+                av_opt_set_sample_fmt(ffp->swr_ctx_record, "osf", ffp->audio_enc_ctx->sample_fmt, 0);
+                
+                // 设置质量参数
+                av_opt_set_int(ffp->swr_ctx_record, "linear_interp", 1, 0);
+                av_opt_set_double(ffp->swr_ctx_record, "cutoff", 0.99, 0);
+                
+                // 设置通道布局
+                if (dec_ctx->channel_layout == 0) {
+                    dec_ctx->channel_layout = av_get_default_channel_layout(dec_ctx->channels);
+                }
+                if (ffp->audio_enc_ctx->channel_layout == 0) {
+                    ffp->audio_enc_ctx->channel_layout = av_get_default_channel_layout(ffp->audio_enc_ctx->channels);
+                }
+                
+                av_opt_set_int(ffp->swr_ctx_record, "icl", dec_ctx->channel_layout, 0);
+                av_opt_set_int(ffp->swr_ctx_record, "ocl", ffp->audio_enc_ctx->channel_layout, 0);
+            }
+            
             ret = swr_init(ffp->swr_ctx_record);
             if (ret < 0) {
                 av_log(ffp, AV_LOG_ERROR, "Failed to initialize the audio resampling context: %s", av_err2str(ret));
                 goto end;
             }
+            
+            av_log(ffp, AV_LOG_INFO, "Audio resampling initialized: %d Hz, %d ch, fmt %d → %d Hz, %d ch, fmt %d",
+                   dec_ctx->sample_rate, dec_ctx->channels, dec_ctx->sample_fmt,
+                   ffp->audio_enc_ctx->sample_rate, ffp->audio_enc_ctx->channels, ffp->audio_enc_ctx->sample_fmt);
         }
     }
     
@@ -6355,12 +6933,18 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         }
     }
     
-    // 分配临时帧
-    av_log(ffp, AV_LOG_DEBUG, "Allocating temporary frame for video conversion");
-    ffp->tmp_frame = av_frame_alloc();
-    if (!ffp->tmp_frame) {
-        av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
-        goto end;
+    // 如果需要视频转码，才分配临时帧
+    if (ffp->video_enc_ctx && !ffp->direct_video_copy) {
+        av_log(ffp, AV_LOG_DEBUG, "Allocating temporary frame for video conversion");
+        ffp->tmp_frame = av_frame_alloc();
+        if (!ffp->tmp_frame) {
+            av_log(ffp, AV_LOG_ERROR, "Failed to allocate temporary frame");
+            goto end;
+        }
+                                } else {
+        // 直接复制模式不需要临时帧
+        ffp->tmp_frame = NULL;
+        av_log(ffp, AV_LOG_DEBUG, "Direct video copy mode, no temporary frame needed");
     }
     
     // 如果有视频编码器，设置关键参数
@@ -6404,6 +6988,29 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     
     // 写视频文件头
     av_log(ffp, AV_LOG_DEBUG, "Writing file header");
+    
+    // MP4容器的特殊处理 - 确保所有音频流使用正确编解码器标签
+    if (strcmp(ffp->m_ofmt->name, "mp4") == 0) {
+        for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+            AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+            if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                // 强制设置为AAC，不管原始格式是什么
+                av_log(ffp, AV_LOG_WARNING, "MP4 container: ensuring audio stream uses AAC codec (current id=%d)",
+                      stream->codecpar->codec_id);
+                
+                // 设置codecpar
+                stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+                stream->codecpar->codec_tag = 0; // 让容器选择合适的tag
+                
+                // 同时设置codec（为了兼容性）
+                if (stream->codec) {
+                    stream->codec->codec_id = AV_CODEC_ID_AAC;
+                    stream->codec->codec_tag = 0;
+                }
+            }
+        }
+    }
+    
     ret = avformat_write_header(ffp->m_ofmt_ctx, NULL);
     if (ret < 0) {
         av_log(ffp, AV_LOG_ERROR, "Error writing file header: %s", av_err2str(ret));
@@ -6440,8 +7047,14 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         }
     }
     
-    pthread_mutex_init(&ffp->record_mutex, NULL);
+    // 初始化互斥锁
+    if (pthread_mutex_init(&ffp->record_mutex, NULL) != 0) {
+        av_log(ffp, AV_LOG_ERROR, "Failed to initialize recording mutex");
+        ffp->is_record = 0;
+        goto end;
+    }
     
+    av_log(ffp, AV_LOG_INFO, "Transcode recording started successfully with direct video copy: %d", ffp->direct_video_copy);
     return 0;
     
 end:
