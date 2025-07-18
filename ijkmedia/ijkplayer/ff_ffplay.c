@@ -5336,10 +5336,15 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         
         // 设置moov atom放在文件开头，这对Android 15非常重要
         AVDictionary *opts = NULL;
-        av_dict_set(&opts, "movflags", "faststart", 0);
+        av_dict_set(&opts, "movflags", "faststart+frag_keyframe", 0);
         
+        // 强制所有流使用标准时间基准
         for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
             AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+            // 设置所有流的时间基准为90000Hz
+            stream->time_base = (AVRational){1, 90000};
+            av_log(ffp, AV_LOG_INFO, "Setting stream %d time base to 1/90000 for Android 15 compatibility", i);
+            
             if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
                 // 强制设置为AAC，不管原始格式是什么
                 av_log(ffp, AV_LOG_WARNING, "MP4 container: ensuring audio stream uses AAC codec (current id=%d)",
@@ -5899,6 +5904,14 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs) {
                            (pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0,
                            ffp->m_ofmt_ctx->streams[pkt->stream_index]->time_base.num,
                            ffp->m_ofmt_ctx->streams[pkt->stream_index]->time_base.den);
+                    
+                    // 强制设置时间基准为90000Hz，这是标准的MP4时间基准
+                    // 这是最关键的修复，确保Android 15能够正确播放
+                    out_stream->time_base = (AVRational){1, 90000};
+                    
+                    // 使用av_packet_rescale_ts函数统一处理时间戳转换
+                    av_packet_rescale_ts(pkt, in_stream->time_base, out_stream->time_base);
+                    
                     ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt);
                     if (ret < 0) {
                         av_log(ffp, AV_LOG_ERROR, "Error writing video packet: %s", av_err2str(ret));
@@ -7511,10 +7524,15 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
         
         // 设置moov atom放在文件开头，这对Android 15非常重要
         AVDictionary *opts = NULL;
-        av_dict_set(&opts, "movflags", "faststart", 0);
+        av_dict_set(&opts, "movflags", "faststart+frag_keyframe", 0);
         
+        // 强制所有流使用标准时间基准
         for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
             AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+            // 设置所有流的时间基准为90000Hz
+            stream->time_base = (AVRational){1, 90000};
+            av_log(ffp, AV_LOG_INFO, "Setting stream %d time base to 1/90000 for Android 15 compatibility", i);
+            
             if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
                 // 强制设置为AAC，不管原始格式是什么
                 av_log(ffp, AV_LOG_WARNING, "MP4 container: ensuring audio stream uses AAC codec (current id=%d)",
@@ -7626,3 +7644,31 @@ end:
     return -1;
 }
 
+// 修复Android 15播放速度问题的辅助函数
+static void fix_android15_playback_speed(FFPlayer *ffp) {
+    if (!ffp || !ffp->m_ofmt_ctx)
+        return;
+        
+    // 只处理MP4容器
+    if (strcmp(ffp->m_ofmt->name, "mp4") != 0)
+        return;
+        
+    av_log(ffp, AV_LOG_INFO, "Applying Android 15 playback speed fix");
+    
+    // 设置所有流的时间基准和帧率
+    for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+        AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+        
+        // 统一时间基准为90000Hz
+        stream->time_base = (AVRational){1, 90000};
+        
+        // 为视频流设置正确的帧率
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            stream->r_frame_rate = (AVRational){30, 1};  // 30fps
+            stream->avg_frame_rate = (AVRational){30, 1};
+            av_log(ffp, AV_LOG_INFO, "Setting video stream %d frame rate to 30fps", i);
+        }
+        
+        av_log(ffp, AV_LOG_INFO, "Setting stream %d time base to 1/90000", i);
+    }
+}
