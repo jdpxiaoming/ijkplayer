@@ -589,6 +589,22 @@ typedef struct FFPlayer {
     int is_record;                      // 是否在录制
     int record_error;
 
+    int is_first;// 第一帧数据
+    int64_t start_pts; // 开始录制时 pts
+    int64_t start_dts; // 开始录制时 dts
+    
+    // H265兼容性优化：时间戳跟踪变量
+    int64_t last_record_dts; // 上一个录制帧的DTS
+    int64_t last_record_pts; // 上一个录制帧的PTS
+    
+    // 🔧 修复最后一帧问题：帧间隔跟踪
+    int64_t prev_video_pts;   // 前一个视频帧的PTS
+    int64_t prev_audio_pts;   // 前一个音频帧的PTS
+    int64_t avg_video_duration; // 平均视频帧间隔
+    int64_t avg_audio_duration; // 平均音频帧间隔
+    int video_frame_count;    // 视频帧计数
+    int audio_frame_count;    // 音频帧计数
+
     int waiting_for_keyframe;           // a new field to indicate if we are waiting for the first video keyframe
     PacketQueue record_audio_queue;     // a new packet queue to buffer audio packets
     int64_t record_first_vpts;          // a new field to store the timestamp of the first keyframe
@@ -605,9 +621,6 @@ typedef struct FFPlayer {
     int out_video_stream_index;         // 输出视频流索引
     int out_audio_stream_index;         // 输出音频流索引
 
-    int is_first;                       // 第一帧数据
-    int64_t start_pts;                  // 开始录制时pts
-    int64_t start_dts;                  // 开始录制时dts
     int64_t min_record_time;            // 最小录制时间(毫秒)
     int64_t record_start_time;          // 录制开始时间(毫秒)
     int64_t record_real_time;           // 录制开始的实际时间（毫秒）
@@ -616,6 +629,9 @@ typedef struct FFPlayer {
     int direct_video_copy;              // 是否直接复制视频流(不转码)
     int64_t last_video_dts;             // 上一个视频包的DTS值
     int64_t last_audio_dts;             // 上一个音频包的DTS值
+    char *record_output_file;           // 最终输出文件名（用于FLV转MP4）
+    int has_hevc_video;                 // 是否有HEVC视频流
+    char *temp_record_file;             // 临时录制文件路径
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
