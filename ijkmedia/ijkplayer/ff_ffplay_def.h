@@ -632,6 +632,8 @@ typedef struct FFPlayer {
     char *record_output_file;           // 最终输出文件名（用于FLV转MP4）
     int has_hevc_video;                 // 是否有HEVC视频流
     char *temp_record_file;             // 临时录制文件路径
+    int *stream_mapping;                // 输入输出流索引映射
+    int nb_output_streams;              // 输出流的数量
 #ifdef FFP_MERGE
     const char *window_title;
     int fs_screen_width;
