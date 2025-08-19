@@ -615,6 +615,8 @@ typedef struct FFPlayer {
 
     // 转码相关变量
     int need_transcode;                 // 是否需要转码
+    int enable_pcm_to_aac_transcode;    // 是否启用PCMU/PCMA到AAC的录制转码
+    AVCodecContext *audio_dec_ctx_record; // 音频解码器上下文(录制用，针对PCMU/PCMA)
     AVCodecContext *video_enc_ctx;      // 视频编码器上下文
     AVCodecContext *audio_enc_ctx;      // 音频编码器上下文
     AVFrame *tmp_frame;                 // 临时帧
