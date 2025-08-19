@@ -3621,9 +3621,26 @@ static int read_thread(void *arg)
         }
 
         if (ffp->is_record) { // 可以录制时，写入文件
+            // 🔧 检查是否为音视频包
+            int is_av_packet = (ic->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ||
+                               ic->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO);
+            
+            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 准备录制包 - 流: %d, 类型: %s, PTS: %lld (视频流:%d, 音频流:%d, 是否音视频:%d)", 
+                   pkt->stream_index,
+                   (pkt->stream_index == is->video_stream) ? "视频" :
+                   (pkt->stream_index == is->audio_stream) ? "音频" : 
+                   (ic->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ? "音频(非主)" :
+                   (ic->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ? "视频(非主)" : "其他",
+                   pkt->pts, is->video_stream, is->audio_stream, is_av_packet);
+                   
+            // 🎯 关键修复：录制所有音视频包，不仅仅是活跃流的包
+            if (is_av_packet) {
             if (0 != ffp_record_file(ffp, pkt)) {
                 ffp->record_error = 1;
                 ffp_stop_record(ffp);
+                }
+            } else {
+                av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 跳过非音视频包 - 流: %d", pkt->stream_index);
             }
         }
 
@@ -3647,14 +3664,20 @@ static int read_thread(void *arg)
                 av_q2d(ic->streams[pkt->stream_index]->time_base) -
                 (double)(ffp->start_time != AV_NOPTS_VALUE ? ffp->start_time : 0) / 1000000
                 <= ((double)ffp->duration / 1000000);
+        // 🔍 详细记录包的分发情况
         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
+            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 音频包放入audioq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
             packet_queue_put(&is->audioq, pkt);
         } else if (pkt->stream_index == is->video_stream && pkt_in_play_range
                    && !(is->video_st && (is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC))) {
+            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 视频包放入videoq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
             packet_queue_put(&is->videoq, pkt);
         } else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range) {
+            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 字幕包放入subtitleq - 流: %d", pkt->stream_index);
             packet_queue_put(&is->subtitleq, pkt);
         } else {
+            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 丢弃包 - 流: %d, 原因: %s", pkt->stream_index,
+                   !pkt_in_play_range ? "不在播放范围" : "未知流类型");
             av_packet_unref(pkt);
         }
 
@@ -3901,7 +3924,6 @@ inline static int log_level_ijk_to_av(int ijk_level)
     else                                    av_level = AV_LOG_TRACE;
     return av_level;
 }
-
 static void ffp_log_callback_brief(void *ptr, int level, const char *fmt, va_list vl)
 {
     if (level > av_log_get_level())
@@ -5159,19 +5181,44 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         goto end;
     }
 
+    // 🔍 详细检查输入流信息
+    av_log(ffp, AV_LOG_INFO, "📊 输入流总数: %d, 视频流: %d, 音频流: %d, 音频禁用: %d", 
+           is->ic->nb_streams, is->video_stream, is->audio_stream, ffp->audio_disable);
+
     for (i = 0; i < is->ic->nb_streams; i++) {
         ffp->stream_mapping[i] = -1;
         AVStream *in_stream = is->ic->streams[i];
         
+        av_log(ffp, AV_LOG_INFO, "🔍 检查流 %d: 类型=%d (%s)", i, in_stream->codecpar->codec_type,
+               (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ? "视频" :
+               (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ? "音频" : "其他");
+        
         if (in_stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO && 
             in_stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
+            av_log(ffp, AV_LOG_INFO, "⏭️ 跳过非音视频流 %d", i);
             continue;
+        }
+        
+        // 🔧 修复：录制所有音视频流，不影响播放逻辑
+        if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (is->video_stream >= 0 && i != is->video_stream) {
+                av_log(ffp, AV_LOG_INFO, "⏭️ 跳过非主视频流 %d (主视频流: %d)", i, is->video_stream);
+                continue;
+            }
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            // 🎯 关键修复：录制音频但不干扰播放
+            // 只要是音频流就录制，不管播放器是否启用
+            av_log(ffp, AV_LOG_INFO, "🔊 录制音频流 %d (播放器音频流: %d)", i, is->audio_stream);
         }
         
         ffp->stream_mapping[i] = ffp->nb_output_streams++;
         
         if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            av_log(ffp, AV_LOG_INFO, "Video codec: %d, will be copied directly", in_stream->codecpar->codec_id);
+            av_log(ffp, AV_LOG_INFO, "📹 映射视频流 %d -> %d, codec: %d", i, ffp->stream_mapping[i], in_stream->codecpar->codec_id);
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            av_log(ffp, AV_LOG_INFO, "🔊 映射音频流 %d -> %d, codec: %d, 采样率: %d, 声道: %d", 
+                   i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, 
+                   in_stream->codecpar->sample_rate, in_stream->codecpar->channels);
         }
         
         // 对照输入流创建输出流通道
@@ -5185,11 +5232,45 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         }
         
                
-        // 将输入视频/音频的参数拷贝至输出视频/音频的AVCodecContext结构体
+        // 🔧 关键修复：录制时的音频格式转换（不影响播放）
+        if (in_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            // 先复制原始参数，确保不影响播放
         if (avcodec_parameters_copy(out_stream->codecpar, in_codecpar) < 0) {
-            av_log(ffp, AV_LOG_ERROR, "将输入视频/音频的参数拷贝至输出视频/音频的AVCodecContext结构体失败： Failed to copy codec parameters\n");
+                av_log(ffp, AV_LOG_ERROR, "Failed to copy audio codec parameters\n");
             goto end;
         }
+            
+            // 🎯 仅在MP4录制时进行格式转换
+            if (strstr(file_name, ".mp4") && 
+                (in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                 in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
+                
+                av_log(ffp, AV_LOG_INFO, "🔊 录制时将PCMU/PCMA转为AAC (不影响播放) - codec_id: %d", in_codecpar->codec_id);
+                
+                // 仅修改输出流参数，不影响输入流
+                out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+                out_stream->codecpar->sample_rate = 44100;
+                out_stream->codecpar->channels = 1;
+                out_stream->codecpar->channel_layout = AV_CH_LAYOUT_MONO;
+                out_stream->codecpar->bit_rate = 64000;
+                out_stream->time_base = (AVRational){1, 44100};
+                
+                av_log(ffp, AV_LOG_INFO, "🎵 录制输出设置: AAC 44.1kHz 单声道 (原始播放不受影响)");
+            } else {
+                // 其他格式或非MP4：直接复制，设置标准时间基准
+                out_stream->time_base = (AVRational){1, 44100};
+                av_log(ffp, AV_LOG_INFO, "🎵 音频录制直接复制，时间基准: 1/44100");
+            }
+        } else {
+            // 视频流处理
+            if (avcodec_parameters_copy(out_stream->codecpar, in_codecpar) < 0) {
+                av_log(ffp, AV_LOG_ERROR, "Failed to copy video codec parameters\n");
+                goto end;
+            }
+            out_stream->time_base = (AVRational){1, 90000};
+            av_log(ffp, AV_LOG_INFO, "🎬 视频录制时间基准: 1/90000");
+        }
+        
         out_stream->codecpar->codec_tag = 0;
         
         // H265兼容性优化设置
@@ -5238,10 +5319,11 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
                 av_log(ffp, AV_LOG_INFO, "设置H265 Level 4.0以提高兼容性\n");
             }
             
-            // 🔧 修复时长问题：H265时间基准必须与输入完全一致
-            out_stream->time_base = in_stream->time_base;
-            av_log(ffp, AV_LOG_INFO, "H265: 强制时间基准一致 %d/%d\n", 
-                   out_stream->time_base.num, out_stream->time_base.den);
+            // 🔧 注释掉：不再强制使用输入时间基准，使用我们设置的标准时间基准
+            // out_stream->time_base = in_stream->time_base;
+            av_log(ffp, AV_LOG_INFO, "H265: 保持标准时间基准 %d/%d (输入: %d/%d)\n", 
+                   out_stream->time_base.num, out_stream->time_base.den,
+                   in_stream->time_base.num, in_stream->time_base.den);
             
             // 附加兼容性设置
             // 1. 确保采样率比例正确
@@ -5313,6 +5395,19 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         }
     }
     
+    // 🔍 显示最终的流映射结果
+    av_log(ffp, AV_LOG_INFO, "📋 最终流映射表:");
+    for (int j = 0; j < is->ic->nb_streams; j++) {
+        if (ffp->stream_mapping[j] >= 0) {
+            AVStream *in_stream = is->ic->streams[j];
+            av_log(ffp, AV_LOG_INFO, "  输入流%d -> 输出流%d (%s)", 
+                   j, ffp->stream_mapping[j],
+                   (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ? "视频" : "音频");
+        } else {
+            av_log(ffp, AV_LOG_INFO, "  输入流%d -> 未映射", j);
+        }
+    }
+    
     av_dump_format(ffp->m_ofmt_ctx, 0, file_name, 1);
     
     // 打开输出文件
@@ -5326,16 +5421,17 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     // 🔧 修复播放问题：设置输出格式选项，确保文件可从头播放
     AVDictionary *options = NULL;
     if (strstr(file_name, ".mp4") || strstr(file_name, ".mov")) {
-        // 🔧 修复播放和封面问题：为MP4/MOV容器设置兼容性选项
-        // faststart: 移动moov atom到文件开头，支持渐进式播放
-        // write_colr: 写入颜色信息，提高兼容性
-        // use_metadata_tags: 写入标准元数据标签
-        // dash: 提高兼容性
-        av_dict_set(&options, "movflags", "faststart+write_colr+use_metadata_tags+dash", 0);
+        // 🔧 修复播放和duration显示问题：关键MP4选项
+        av_dict_set(&options, "movflags", "faststart+write_colr+use_metadata_tags", 0);
         
-        // 🎯 修复封面和时长问题：设置额外的兼容性参数
-        av_dict_set(&options, "fflags", "+genpts", 0); // 生成PTS以确保正确的时间戳
+        // 🎯 确保duration正确显示的关键参数
+        av_dict_set(&options, "fflags", "+genpts", 0); // 生成PTS
         av_dict_set(&options, "avoid_negative_ts", "make_zero", 0); // 避免负时间戳
+        av_dict_set(&options, "write_tmcd", "0", 0); // 不写入时间码轨道
+        
+        // 🔧 强制MP4使用标准结构
+        av_dict_set(&options, "brand", "mp41", 0);
+        av_dict_set(&options, "use_editlist", "0", 0); // 禁用编辑列表，简化结构
         
         // 检查是否有H265流，设置对应的brand和兼容性标签
         int has_hevc = 0;
@@ -5370,12 +5466,23 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     
     ffp->is_record = 1;
     ffp->record_error = 0;
-    // 初始化时间戳跟踪变量 - 重置首帧标志
+    
+    // 🔧 完整初始化所有录制相关变量
     ffp->is_first = 0; // 重置为0，表示还没处理第一帧
     ffp->start_pts = AV_NOPTS_VALUE;
     ffp->start_dts = AV_NOPTS_VALUE;
     ffp->last_record_dts = AV_NOPTS_VALUE;
     ffp->last_record_pts = AV_NOPTS_VALUE;
+    ffp->last_v_pts_for_rec = AV_NOPTS_VALUE;
+    ffp->last_a_pts_for_rec = AV_NOPTS_VALUE;
+    
+    // 🎯 关键：重置帧计数器
+    ffp->video_frame_count = 0;
+    ffp->audio_frame_count = 0;
+    ffp->last_video_dts = AV_NOPTS_VALUE;
+    ffp->last_audio_dts = AV_NOPTS_VALUE;
+    
+    av_log(ffp, AV_LOG_INFO, "🎬 录制变量初始化完成");
     
     // 🔧 初始化帧间隔跟踪字段
     ffp->prev_video_pts = AV_NOPTS_VALUE;
@@ -5486,7 +5593,82 @@ int ffp_stop_record(FFPlayer *ffp)
        av_log(ffp, AV_LOG_INFO, "📝 准备写入文件尾，最后记录的时间戳 - PTS: %lld, DTS: %lld\n", 
               ffp->last_record_pts, ffp->last_record_dts);
        
-                            // 🚨 H265特殊修复：修复时长异常问题
+        // 🎯 关键修复：基于实际录制内容和流的时间基准计算duration
+        if (ffp->last_record_pts != AV_NOPTS_VALUE && ffp->last_record_pts > 0) {
+            // 优先使用音频时长，没有音频则使用视频时长
+            double master_duration_sec = 0;
+            
+            if (ffp->audio_frame_count > 0) {
+                // 有音频：以音频为主时钟
+                master_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+                av_log(ffp, AV_LOG_INFO, "🎵 以音频为主时钟: %d帧 × 1024样本 ÷ 44100Hz = %.2f秒", 
+                       ffp->audio_frame_count, master_duration_sec);
+            } else {
+                // 无音频：以视频为主时钟
+                master_duration_sec = (double)ffp->video_frame_count / 25.0;
+                av_log(ffp, AV_LOG_INFO, "🎬 以视频为主时钟: %d帧 ÷ 25fps = %.2f秒", 
+                       ffp->video_frame_count, master_duration_sec);
+            }
+            
+            // 为每个流设置duration（使用各自的时间基准）
+            for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+                if (stream) {
+                    // 将主时钟时长转换为流的时间基准
+                    stream->duration = av_rescale_q((int64_t)(master_duration_sec * AV_TIME_BASE), 
+                                                   (AVRational){1, AV_TIME_BASE}, stream->time_base);
+                    
+                    double check_duration = (double)stream->duration * stream->time_base.num / stream->time_base.den;
+                    av_log(ffp, AV_LOG_INFO, "🔧 流%d duration: %lld (%.2f秒, 时间基准:%d/%d)", 
+                           i, stream->duration, check_duration, stream->time_base.num, stream->time_base.den);
+                }
+            }
+            
+            // 设置容器duration
+            ffp->m_ofmt_ctx->duration = (int64_t)(master_duration_sec * AV_TIME_BASE);
+            av_log(ffp, AV_LOG_INFO, "🔧 容器duration: %lld (%.2f秒)", ffp->m_ofmt_ctx->duration, master_duration_sec);
+            
+            // 🎯 为MP4设置关键元数据
+            char duration_str[64];
+            snprintf(duration_str, sizeof(duration_str), "%.3f", master_duration_sec);
+            av_dict_set(&ffp->m_ofmt_ctx->metadata, "duration", duration_str, 0);
+            av_dict_set(&ffp->m_ofmt_ctx->metadata, "encoder", "IJKPlayer", 0);
+            
+        } else {
+            av_log(ffp, AV_LOG_WARNING, "⚠️ 无法设置duration，last_record_pts无效: %lld", ffp->last_record_pts);
+            
+            // 🔧 备用方案：基于帧计数估算duration
+            if (ffp->video_frame_count > 0 || ffp->audio_frame_count > 0) {
+                double estimated_duration = 0;
+                
+                if (ffp->video_frame_count > 0) {
+                    estimated_duration = (double)ffp->video_frame_count / 25.0; // 假设25fps
+                }
+                
+                if (ffp->audio_frame_count > 0) {
+                    double audio_duration = (double)(ffp->audio_frame_count * 1024) / 44100.0; // 假设44.1kHz
+                    if (audio_duration > estimated_duration) {
+                        estimated_duration = audio_duration;
+                    }
+                }
+                
+                // 为所有流设置duration
+                for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                    AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+                    if (stream) {
+                        stream->duration = av_rescale_q((int64_t)(estimated_duration * AV_TIME_BASE), 
+                                                       (AVRational){1, AV_TIME_BASE}, stream->time_base);
+                        av_log(ffp, AV_LOG_INFO, "🔧 备用方案设置流%d duration: %lld", i, stream->duration);
+                    }
+                }
+                
+                ffp->m_ofmt_ctx->duration = (int64_t)(estimated_duration * AV_TIME_BASE);
+                av_log(ffp, AV_LOG_INFO, "🔧 备用方案设置容器duration: %.2f秒 (视频:%d帧, 音频:%d帧)", 
+                       estimated_duration, ffp->video_frame_count, ffp->audio_frame_count);
+            }
+        }
+       
+        // 🚨 H265特殊修复：修复时长异常问题（在重置变量之前处理）
         if (has_hevc_stream && ffp->last_record_pts != AV_NOPTS_VALUE) {
             // 🔧 关键修复：last_record_pts是相对于start_pts的偏移量，不是绝对时长
             int64_t actual_duration_pts = ffp->last_record_pts; // 这已经是相对时间了
@@ -5520,8 +5702,130 @@ int ffp_stop_record(FFPlayer *ffp)
             }
         }
        
+       // 🔧 在写入trailer之前，最后一次确保duration正确
+       av_log(ffp, AV_LOG_INFO, "📊 录制统计 - 视频帧: %d, 音频帧: %d", 
+              ffp->video_frame_count, ffp->audio_frame_count);
+       
+       // 🎯 最终修复：基于实际录制情况设置duration
+       double final_duration_sec = 0;
+       
+       if (ffp->audio_frame_count > 0) {
+           // 有音频：以音频为准，需要根据实际音频格式计算
+           // 检查第一个音频流的格式
+           AVStream *audio_stream = NULL;
+           for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+               if (ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                   audio_stream = ffp->m_ofmt_ctx->streams[i];
+                   break;
+               }
+           }
+           
+           if (audio_stream && (audio_stream->codecpar->codec_id == AV_CODEC_ID_AAC)) {
+               // 检查是否是从PCMU/PCMA转换来的AAC
+               // 通过检查输入流来确定原始格式
+               int is_from_pcm = 0;
+               VideoState *is = ffp->is; // 声明is变量
+               if (is && is->ic && ffp->stream_mapping) {
+                   // 找到对应的输入流索引
+                   int input_stream_index = -1;
+                   for (int j = 0; j < is->ic->nb_streams; j++) {
+                       if (ffp->stream_mapping[j] >= 0 && 
+                           ffp->stream_mapping[j] == (audio_stream - ffp->m_ofmt_ctx->streams[0])) {
+                           input_stream_index = j;
+                           break;
+                       }
+                   }
+                   
+                   // 检查输入流是否为PCMU/PCMA
+                   if (input_stream_index >= 0 && 
+                       (is->ic->streams[input_stream_index]->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW ||
+                        is->ic->streams[input_stream_index]->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
+                       is_from_pcm = 1;
+                   }
+               }
+               
+               if (is_from_pcm) {
+                   // 从PCMU/PCMA转换的AAC
+                   final_duration_sec = (double)(ffp->audio_frame_count * 160) / 8000.0;
+                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于PCMU/PCMA->AAC: %d帧 × 160样本 ÷ 8000Hz = %.2f秒", 
+                          ffp->audio_frame_count, final_duration_sec);
+               } else {
+                   // 原生AAC
+                   final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 = %.2f秒", ffp->audio_frame_count, final_duration_sec);
+               }
+           } else {
+               // 其他音频格式
+               final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+               av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于标准音频: %d帧 = %.2f秒", ffp->audio_frame_count, final_duration_sec);
+           }
+       } else if (ffp->video_frame_count > 0) {
+           // 无音频：以视频为准
+           final_duration_sec = (double)ffp->video_frame_count / 25.0;
+           av_log(ffp, AV_LOG_INFO, "🎬 最终duration基于视频: %d帧 = %.2f秒", ffp->video_frame_count, final_duration_sec);
+       }
+       
+       if (final_duration_sec > 0) {
+           // 为每个流设置正确的duration
+           for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+               AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+               if (stream) {
+                   // 将duration转换为流的时间基准
+                   stream->duration = av_rescale_q((int64_t)(final_duration_sec * AV_TIME_BASE), 
+                                                  (AVRational){1, AV_TIME_BASE}, stream->time_base);
+                   
+                   // 🔧 关键：为MP4设置track header duration
+                   if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                       av_dict_set(&stream->metadata, "handler_name", "VideoHandler", 0);
+                   } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                       av_dict_set(&stream->metadata, "handler_name", "SoundHandler", 0);
+                   }
+                   
+                   av_log(ffp, AV_LOG_INFO, "🎬 最终设置流%d duration: %lld (%.2f秒, 时间基准:%d/%d)", 
+                          i, stream->duration, final_duration_sec, 
+                          stream->time_base.num, stream->time_base.den);
+               }
+           }
+           
+           // 设置容器duration
+           ffp->m_ofmt_ctx->duration = (int64_t)(final_duration_sec * AV_TIME_BASE);
+           
+           // 🔧 关键：设置完整的MP4 metadata
+           char duration_ms_str[64];
+           snprintf(duration_ms_str, sizeof(duration_ms_str), "%lld", (int64_t)(final_duration_sec * 1000));
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "duration_ms", duration_ms_str, 0);
+           
+           char duration_sec_str[64];
+           snprintf(duration_sec_str, sizeof(duration_sec_str), "%.3f", final_duration_sec);
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "duration", duration_sec_str, 0);
+           
+           // 🎯 MP4播放器兼容性metadata
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "title", "IJKPlayer Recording", 0);
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "encoder", "IJKPlayer", 0);
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "creation_time", "now", 0);
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "major_brand", "mp41", 0);
+           av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "mp41,isom", 0);
+           
+           av_log(ffp, AV_LOG_INFO, "🎯 最终容器duration: %lld (%.2f秒), 完整metadata已设置", 
+                  ffp->m_ofmt_ctx->duration, final_duration_sec);
+        }
+       
        // 刷新所有待写入的数据包
        av_interleaved_write_frame(ffp->m_ofmt_ctx, NULL);
+       
+       // 🔧 在写入trailer前，最后确保所有duration信息正确
+       if (ffp->m_ofmt_ctx->duration > 0) {
+           // 确保所有流的duration与容器duration一致
+           for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+               AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+               if (stream && stream->duration <= 0) {
+                   // 如果流duration无效，基于容器duration设置
+                   stream->duration = av_rescale_q(ffp->m_ofmt_ctx->duration, 
+                                                  (AVRational){1, AV_TIME_BASE}, stream->time_base);
+                   av_log(ffp, AV_LOG_INFO, "🔧 修正流%d duration: %lld", i, stream->duration);
+               }
+           }
+       }
        
        // 安全地写入文件尾
        int trailer_ret = av_write_trailer(ffp->m_ofmt_ctx);
@@ -5543,21 +5847,6 @@ int ffp_stop_record(FFPlayer *ffp)
        avformat_free_context(ffp->m_ofmt_ctx);
        ffp->m_ofmt_ctx = NULL;
        ffp->m_ofmt = NULL;
-       
-       // 重置录制状态
-       ffp->is_first = 0;
-       ffp->start_pts = AV_NOPTS_VALUE;
-       ffp->start_dts = AV_NOPTS_VALUE;
-       ffp->last_record_dts = AV_NOPTS_VALUE;
-       ffp->last_record_pts = AV_NOPTS_VALUE;
-       
-       // 🔧 重置帧间隔跟踪字段
-       ffp->prev_video_pts = AV_NOPTS_VALUE;
-       ffp->prev_audio_pts = AV_NOPTS_VALUE;
-       ffp->avg_video_duration = 0;
-       ffp->avg_audio_duration = 0;
-       ffp->video_frame_count = 0;
-       ffp->audio_frame_count = 0;
        
        // 🔧 修复时长问题：重置流级别时间戳基准（需要放在ffp_record_file外部访问）
        // 这里通过函数标志来触发重置
@@ -5589,6 +5878,20 @@ int ffp_stop_record(FFPlayer *ffp)
        av_free(recorded_file_path);
        recorded_file_path = NULL;
    }
+   
+   // 🔧 最后重置录制状态变量（在所有处理完成后）
+   ffp->is_first = 0;
+   ffp->start_pts = AV_NOPTS_VALUE;
+   ffp->start_dts = AV_NOPTS_VALUE;
+   ffp->last_record_dts = AV_NOPTS_VALUE;
+   ffp->last_record_pts = AV_NOPTS_VALUE;
+   ffp->prev_video_pts = AV_NOPTS_VALUE;
+   ffp->prev_audio_pts = AV_NOPTS_VALUE;
+   ffp->avg_video_duration = 0;
+   ffp->avg_audio_duration = 0;
+   ffp->video_frame_count = 0;
+   ffp->audio_frame_count = 0;
+   av_log(ffp, AV_LOG_INFO, "🔧 录制状态变量已重置\n");
    
    return 0;   
 }
@@ -5776,8 +6079,13 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet) {
     // 关键修复：使用码流映射来获取正确的输出索引
     int out_stream_index = ffp->stream_mapping[in_stream_index];
     if (out_stream_index < 0) {
+        av_log(NULL, AV_LOG_WARNING, "[RECORD] 流 %d 未被映射，跳过录制", in_stream_index);
         return 0; // This stream is not being recorded
     }
+    
+    av_log(NULL, AV_LOG_INFO, "[RECORD] 处理流 %d -> %d (%s)", 
+           in_stream_index, out_stream_index,
+           (is->ic->streams[in_stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ? "视频" : "音频");
 
     pthread_mutex_lock(&ffp->record_mutex);
     
@@ -5803,48 +6111,127 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet) {
         return ret;
     }
     
+    av_log(NULL, AV_LOG_INFO, "[RECORD] Original PTS: %lld, DTS: %lld, Stream: %d", pkt->pts, pkt->dts, in_stream_index);
+    
     AVStream *in_stream  = is->ic->streams[in_stream_index];
     AVStream *out_stream = ffp->m_ofmt_ctx->streams[out_stream_index];
     
     // 在数据包上设置正确的输出流索引
     pkt->stream_index = out_stream_index; 
     
-    // 在第一个数据包上初始化时间戳
-    if (!ffp->is_first) {
-        if (pkt->pts != AV_NOPTS_VALUE) ffp->start_pts = pkt->pts;
-        if (pkt->dts != AV_NOPTS_VALUE) ffp->start_dts = pkt->dts;
-        if (ffp->start_pts != AV_NOPTS_VALUE || ffp->start_dts != AV_NOPTS_VALUE) {
+    // -----------------------------------------------------------------
+    // 🎯 全新的时间戳处理方案：基于帧计数的绝对时间戳
+    
+    // 初始化时间戳基准（只在第一个包时执行）
+    if (ffp->is_first == 0) {
+        ffp->start_pts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts : 0;
+        ffp->start_dts = (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts : 0;
             ffp->is_first = 1;
+        
+        // 重置帧计数器
+        ffp->video_frame_count = 0;
+        ffp->audio_frame_count = 0;
+        
+        av_log(NULL, AV_LOG_INFO, "[RECORD] 🎬 录制开始 - 基准PTS: %lld, DTS: %lld", ffp->start_pts, ffp->start_dts);
+    }
+    
+    // 🔧 关键修复：基于帧计数生成同步的时间戳
+    if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        // 视频：使用帧计数，确保与音频同步
+        int64_t video_pts;
+        if (ffp->audio_frame_count > 0) {
+            // 有音频：视频时间戳基于音频主时钟
+            video_pts = av_rescale_q(ffp->video_frame_count * 1024, (AVRational){1, 44100}, in_stream->time_base);
+        } else {
+            // 无音频：视频使用自己的时钟
+            video_pts = av_rescale_q(ffp->video_frame_count, (AVRational){1, 25}, in_stream->time_base);
+        }
+        pkt->pts = video_pts;
+        pkt->dts = video_pts;
+        ffp->video_frame_count++;
+        
+        av_log(NULL, AV_LOG_INFO, "[RECORD] 📹 视频帧#%d PTS: %lld", ffp->video_frame_count, pkt->pts);
+    } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        // 🎯 音频处理：生成连续时间戳，支持PCMU/PCMA
+        
+        // 检查输出流是否需要转码（PCMU/PCMA -> AAC）
+        int need_audio_transcode = (out_stream->codecpar->codec_id != in_stream->codecpar->codec_id);
+        
+        if (need_audio_transcode && 
+            (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
+             in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
+            
+            av_log(NULL, AV_LOG_INFO, "[RECORD] 🔊 PCMU/PCMA->AAC转码音频 (输入: %d, 输出: %d)", 
+                   in_stream->codecpar->codec_id, out_stream->codecpar->codec_id);
+            
+            // PCMU/PCMA: 8kHz, 160样本/帧
+            int samples_per_frame = 160;
+            int input_sample_rate = (in_stream->codecpar->sample_rate > 0) ? in_stream->codecpar->sample_rate : 8000;
+            
+            // 生成基于原始格式的时间戳
+            int64_t audio_pts = av_rescale_q(ffp->audio_frame_count * samples_per_frame, 
+                                           (AVRational){1, input_sample_rate}, in_stream->time_base);
+            pkt->pts = audio_pts;
+            pkt->dts = audio_pts;
+            ffp->audio_frame_count++;
+            
+            av_log(NULL, AV_LOG_INFO, "[RECORD] 🎵 PCMU/PCMA帧#%d PTS: %lld (%dHz->44.1kHz)", 
+                   ffp->audio_frame_count, pkt->pts, input_sample_rate);
+                   
+        } else {
+            // 其他音频格式或直接复制：标准处理
+            int64_t audio_pts = av_rescale_q(ffp->audio_frame_count * 1024, (AVRational){1, 44100}, in_stream->time_base);
+            pkt->pts = audio_pts;
+            pkt->dts = audio_pts;
+            ffp->audio_frame_count++;
+            
+            av_log(NULL, AV_LOG_INFO, "[RECORD] 🔊 标准音频帧#%d PTS: %lld", ffp->audio_frame_count, pkt->pts);
         }
     }
     
-    // 将时间戳重新计算为从0开始
-    if (pkt->pts != AV_NOPTS_VALUE && ffp->start_pts != AV_NOPTS_VALUE) {
-        pkt->pts -= ffp->start_pts;
-    }
-    if (pkt->dts != AV_NOPTS_VALUE && ffp->start_dts != AV_NOPTS_VALUE) {
-        pkt->dts -= ffp->start_dts;
-    }
-    
-    // 保证时间戳非负
-    if (pkt->pts < 0) pkt->pts = 0;
-    if (pkt->dts < 0) pkt->dts = 0;
-
-    // 转换时间戳到输出流的时间基准
+    // 时间戳现在已经是从0开始的连续值，直接转换到输出流时间基准
     pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
     pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+    
+    // 确保时间戳单调递增（分流处理）
+    if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (ffp->last_video_dts != AV_NOPTS_VALUE && pkt->dts <= ffp->last_video_dts) {
+            pkt->dts = ffp->last_video_dts + 1;
+            if (pkt->pts < pkt->dts) pkt->pts = pkt->dts;
+        }
+    } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        if (ffp->last_audio_dts != AV_NOPTS_VALUE && pkt->dts <= ffp->last_audio_dts) {
+            pkt->dts = ffp->last_audio_dts + 1;
+            if (pkt->pts < pkt->dts) pkt->pts = pkt->dts;
+        }
+    }
+    
+    av_log(NULL, AV_LOG_INFO, "[RECORD] 转换后 PTS: %lld, DTS: %lld", pkt->pts, pkt->dts);
+
     pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
     pkt->pos = -1;
 
-    // 保证DTS不大于PTS
-    if (pkt->dts > pkt->pts) {
-        pkt->dts = pkt->pts;
-    }
+    av_log(NULL, AV_LOG_INFO, "[RECORD] Final PTS: %lld, DTS: %lld", pkt->pts, pkt->dts);
+    
+    // 🔧 关键修复：在写入前保存时间戳，因为av_interleaved_write_frame会重置pkt的时间戳
+    int64_t saved_pts = pkt->pts;
+    int64_t saved_dts = pkt->dts;
 
     // 将数据包写入输出文件
     ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt);
     if (ret < 0) {
         av_log(ffp, AV_LOG_ERROR, "Error writing frame: %s\n", av_err2str(ret));
+    } else {
+        // 成功写入后分别更新对应流的最后 DTS（使用保存的值）
+        if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            ffp->last_video_dts = saved_dts;
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            ffp->last_audio_dts = saved_dts;
+        }
+        // 同步更新全局最新时间戳，便于停止录制时统计（使用保存的值）
+        ffp->last_record_dts = saved_dts;
+        ffp->last_record_pts = saved_pts;
+        av_log(NULL, AV_LOG_INFO, "[RECORD] 保存的时间戳 - PTS: %lld, DTS: %lld", saved_pts, saved_dts);
     }
     
     pthread_mutex_unlock(&ffp->record_mutex);
@@ -6160,8 +6547,8 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
     av_log(ffp, AV_LOG_DEBUG, "Output format: %s", ffp->m_ofmt->name);
     
     // 初始化时间戳追踪变量
-    ffp->last_video_dts = -1;
-    ffp->last_audio_dts = -1;
+    ffp->last_video_dts = AV_NOPTS_VALUE;
+    ffp->last_audio_dts = AV_NOPTS_VALUE;
     
     // 创建输出流
     av_log(ffp, AV_LOG_DEBUG, "Creating output streams, input has %d streams", is->ic->nb_streams);
@@ -6209,10 +6596,11 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                 }
             }
             
-            // 设置时间基准
-            out_stream->time_base = in_stream->time_base;
-            av_log(ffp, AV_LOG_INFO, "Video stream time base: %d/%d", 
-                   out_stream->time_base.num, out_stream->time_base.den);
+            // 🔧 使用标准时间基准而不是输入流的时间基准
+            // out_stream->time_base = in_stream->time_base;
+            av_log(ffp, AV_LOG_INFO, "Video stream time base: %d/%d (输入: %d/%d)", 
+                   out_stream->time_base.num, out_stream->time_base.den,
+                   in_stream->time_base.num, in_stream->time_base.den);
             
             // 确保设置正确的编解码器标记
             // 对于HEVC视频，检查输入流的codec_tag并保持一致
@@ -6438,6 +6826,19 @@ int ffp_start_record_transcode(FFPlayer *ffp, const char *file_name) {
                (int)ffp->audio_enc_ctx->bit_rate);
     }
     
+    // 🔍 显示最终的流映射结果
+    av_log(ffp, AV_LOG_INFO, "📋 最终流映射表:");
+    for (int j = 0; j < is->ic->nb_streams; j++) {
+        if (ffp->stream_mapping[j] >= 0) {
+            AVStream *in_stream = is->ic->streams[j];
+            av_log(ffp, AV_LOG_INFO, "  输入流%d -> 输出流%d (%s)", 
+                   j, ffp->stream_mapping[j],
+                   (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) ? "视频" : "音频");
+        } else {
+            av_log(ffp, AV_LOG_INFO, "  输入流%d -> 未映射", j);
+        }
+    }
+    
     av_dump_format(ffp->m_ofmt_ctx, 0, file_name, 1);
     
     // 打开输出文件
@@ -6619,10 +7020,6 @@ static void fix_android15_playback_speed(FFPlayer *ffp) {
         av_log(ffp, AV_LOG_INFO, "Setting stream %d time base to 1/90000", i);
     }
 }
-
-
-
-
 //文件转码为h265.
 int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
     AVFormatContext *input_ctx = NULL;

@@ -604,6 +604,8 @@ typedef struct FFPlayer {
     int64_t avg_audio_duration; // 平均音频帧间隔
     int video_frame_count;    // 视频帧计数
     int audio_frame_count;    // 音频帧计数
+    int64_t last_v_pts_for_rec;         // For generating timestamps
+    int64_t last_a_pts_for_rec;         // For generating timestamps
 
     int waiting_for_keyframe;           // a new field to indicate if we are waiting for the first video keyframe
     PacketQueue record_audio_queue;     // a new packet queue to buffer audio packets
