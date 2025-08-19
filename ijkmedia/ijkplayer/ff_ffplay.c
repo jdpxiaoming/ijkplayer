@@ -3666,11 +3666,11 @@ static int read_thread(void *arg)
                 <= ((double)ffp->duration / 1000000);
         // 🔍 详细记录包的分发情况
         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
-            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 音频包放入audioq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
+            // av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 音频包放入audioq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
             packet_queue_put(&is->audioq, pkt);
         } else if (pkt->stream_index == is->video_stream && pkt_in_play_range
                    && !(is->video_st && (is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC))) {
-            av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 视频包放入videoq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
+            // av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 视频包放入videoq - 流: %d, PTS: %lld", pkt->stream_index, pkt->pts);
             packet_queue_put(&is->videoq, pkt);
         } else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range) {
             av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 字幕包放入subtitleq - 流: %d", pkt->stream_index);
@@ -5214,7 +5214,16 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         ffp->stream_mapping[i] = ffp->nb_output_streams++;
         
         if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            av_log(ffp, AV_LOG_INFO, "📹 映射视频流 %d -> %d, codec: %d", i, ffp->stream_mapping[i], in_stream->codecpar->codec_id);
+            // 显示视频流的详细信息，包括格式标签
+            char codec_tag_str[5] = {0};
+            if (in_stream->codecpar->codec_tag) {
+                codec_tag_str[0] = (in_stream->codecpar->codec_tag >> 24) & 0xFF;
+                codec_tag_str[1] = (in_stream->codecpar->codec_tag >> 16) & 0xFF;
+                codec_tag_str[2] = (in_stream->codecpar->codec_tag >> 8) & 0xFF;
+                codec_tag_str[3] = in_stream->codecpar->codec_tag & 0xFF;
+            }
+            av_log(ffp, AV_LOG_INFO, "📹 映射视频流 %d -> %d, codec: %d, 格式标签: %s", 
+                   i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, codec_tag_str);
         } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             av_log(ffp, AV_LOG_INFO, "🔊 映射音频流 %d -> %d, codec: %d, 采样率: %d, 声道: %d", 
                    i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, 
@@ -5230,6 +5239,7 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
             av_log(ffp, AV_LOG_ERROR, "Failed allocating output stream\n");
             goto end;
         }
+        av_dict_set(&out_stream->metadata, "language", "eng", 0);
         
                
         // 🔧 关键修复：录制时的音频格式转换（不影响播放）
@@ -5240,26 +5250,34 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
             goto end;
         }
             
-            // 🎯 仅在MP4录制时进行格式转换
-            if (strstr(file_name, ".mp4") && 
-                (in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
-                 in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
+            // 🎯 兼容性优先：优先直接拷贝，避免转码问题
+            if (strstr(file_name, ".mp4")) {
+                // 检查是否需要转换（PCMU/PCMA或其他格式）
+                int need_transcode = (in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                                     in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW);
                 
-                av_log(ffp, AV_LOG_INFO, "🔊 录制时将PCMU/PCMA转为AAC (不影响播放) - codec_id: %d", in_codecpar->codec_id);
-                
-                // 仅修改输出流参数，不影响输入流
-                out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
-                out_stream->codecpar->sample_rate = 44100;
-                out_stream->codecpar->channels = 1;
-                out_stream->codecpar->channel_layout = AV_CH_LAYOUT_MONO;
-                out_stream->codecpar->bit_rate = 64000;
-                out_stream->time_base = (AVRational){1, 44100};
-                
-                av_log(ffp, AV_LOG_INFO, "🎵 录制输出设置: AAC 44.1kHz 单声道 (原始播放不受影响)");
+                if (need_transcode) {
+                    av_log(ffp, AV_LOG_INFO, "🔊 录制时转换音频为AAC - 原始codec: %d", in_codecpar->codec_id);
+                    
+                    // 🎯 兼容性设置：AAC 44.1kHz 单声道（更兼容）
+                    out_stream->codecpar->codec_id = AV_CODEC_ID_AAC;
+                    out_stream->codecpar->sample_rate = 44100;  // 更兼容的采样率
+                    out_stream->codecpar->channels = 1;
+                    out_stream->codecpar->channel_layout = AV_CH_LAYOUT_MONO;
+                    out_stream->codecpar->bit_rate = 128000;    // 128kbps
+                    out_stream->time_base = (AVRational){1, 44100};    // 对应44.1kHz
+                    
+                    av_log(ffp, AV_LOG_INFO, "🎵 兼容性设置: AAC 44.1kHz 单声道 128kbps");
+                } else {
+                    // 🎯 直接拷贝：保持原始参数，确保兼容性
+                    av_log(ffp, AV_LOG_INFO, "🎵 直接拷贝音频流，保持原始参数");
+                    // 保持原始时间基准，不强制修改
+                    out_stream->time_base = in_stream->time_base;
+                }
             } else {
-                // 其他格式或非MP4：直接复制，设置标准时间基准
-                out_stream->time_base = (AVRational){1, 44100};
-                av_log(ffp, AV_LOG_INFO, "🎵 音频录制直接复制，时间基准: 1/44100");
+                // 非MP4格式：保持原始参数
+                out_stream->time_base = in_stream->time_base;
+                av_log(ffp, AV_LOG_INFO, "🎵 非MP4音频录制，保持原始时间基准");
             }
         } else {
             // 视频流处理
@@ -5273,92 +5291,46 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         
         out_stream->codecpar->codec_tag = 0;
         
-        // H265兼容性优化设置
+        // 🎯 兼容性优先：H265视频流设置
         if (in_codecpar->codec_type == AVMEDIA_TYPE_VIDEO && 
             in_codecpar->codec_id == AV_CODEC_ID_HEVC) {
             
-            av_log(ffp, AV_LOG_INFO, "检测到H265视频流，应用兼容性优化设置\n");
+            av_log(ffp, AV_LOG_INFO, "🎯 检测到H265视频流，应用兼容性设置\n");
             
-            // 强制使用标准yuv420p像素格式而不是yuvj420p
-            if (out_stream->codecpar->format == AV_PIX_FMT_YUVJ420P) {
-                out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
-                av_log(ffp, AV_LOG_INFO, "像素格式从yuvj420p(pc)转换为yuv420p(tv)以修复兼容性问题\n");
-            } else if (out_stream->codecpar->format == AV_PIX_FMT_YUVJ422P) {
-                out_stream->codecpar->format = AV_PIX_FMT_YUV422P;
-                av_log(ffp, AV_LOG_INFO, "像素格式从yuvj422p转换为yuv422p以提高兼容性\n");
-            } else if (out_stream->codecpar->format == AV_PIX_FMT_YUVJ444P) {
-                out_stream->codecpar->format = AV_PIX_FMT_YUV444P;
-                av_log(ffp, AV_LOG_INFO, "像素格式从yuvj444p转换为yuv444p以提高兼容性\n");
-            }
-            
-            // 设置色彩空间信息以提高兼容性
-            if (out_stream->codecpar->color_space == AVCOL_SPC_UNSPECIFIED) {
-                out_stream->codecpar->color_space = AVCOL_SPC_BT709;
-            }
-            if (out_stream->codecpar->color_primaries == AVCOL_PRI_UNSPECIFIED) {
-                out_stream->codecpar->color_primaries = AVCOL_PRI_BT709;
-            }
-            if (out_stream->codecpar->color_trc == AVCOL_TRC_UNSPECIFIED) {
-                out_stream->codecpar->color_trc = AVCOL_TRC_BT709;
-            }
-            if (out_stream->codecpar->color_range == AVCOL_RANGE_UNSPECIFIED) {
-                out_stream->codecpar->color_range = AVCOL_RANGE_MPEG; // 使用有限范围而不是全范围
-            }
-            
-            // 限制到Main Profile以确保最大兼容性
-            if (out_stream->codecpar->profile == FF_PROFILE_UNKNOWN || 
-                out_stream->codecpar->profile > FF_PROFILE_HEVC_MAIN) {
-                out_stream->codecpar->profile = FF_PROFILE_HEVC_MAIN;
-                av_log(ffp, AV_LOG_INFO, "设置H265 Main Profile以提高兼容性\n");
-            }
-            
-            // 限制Level以确保兼容性（Level 4.0适合大多数设备）
-            if (out_stream->codecpar->level == FF_LEVEL_UNKNOWN ||
-                out_stream->codecpar->level > 120) { // Level 4.0 = 120
-                out_stream->codecpar->level = 120; // Level 4.0
-                av_log(ffp, AV_LOG_INFO, "设置H265 Level 4.0以提高兼容性\n");
-            }
-            
-            // 🔧 注释掉：不再强制使用输入时间基准，使用我们设置的标准时间基准
-            // out_stream->time_base = in_stream->time_base;
-            av_log(ffp, AV_LOG_INFO, "H265: 保持标准时间基准 %d/%d (输入: %d/%d)\n", 
-                   out_stream->time_base.num, out_stream->time_base.den,
-                   in_stream->time_base.num, in_stream->time_base.den);
-            
-            // 附加兼容性设置
-            // 1. 确保采样率比例正确
-            if (out_stream->codecpar->sample_aspect_ratio.num == 0 || 
-                out_stream->codecpar->sample_aspect_ratio.den == 0) {
-                out_stream->codecpar->sample_aspect_ratio = (AVRational){1, 1};
-            }
-            
-            // 2. 强制设置合适的比特率（解决BitRate=0问题）
-            if (out_stream->codecpar->bit_rate == 0) {
-                if (in_stream->codecpar->bit_rate > 0) {
-                    // 使用输入比特率，但限制在合理范围内
-                    int64_t max_bitrate = 5000000; // 5Mbps 最大限制
-                    int64_t min_bitrate = 1000000;  // 1Mbps 最小限制，确保质量
-                    out_stream->codecpar->bit_rate = FFMAX(FFMIN(in_stream->codecpar->bit_rate, max_bitrate), min_bitrate);
-                    av_log(ffp, AV_LOG_INFO, "H265: 使用输入比特率 %lld bps\n", out_stream->codecpar->bit_rate);
-            } else {
-                    // 如果输入也没有比特率，设置默认值
-                    out_stream->codecpar->bit_rate = 2000000; // 2Mbps 默认，适合H265
-                    av_log(ffp, AV_LOG_INFO, "H265: 设置默认比特率 2Mbps\n");
+            // 🎯 依据HVCC头选择标签：extradata[0]==1 -> hvc1；否则 hev1
+            if (out_stream->codecpar->codec_tag == 0) {
+                int has_hvcc = 0;
+                if (in_stream->codecpar->extradata_size > 0 && in_stream->codecpar->extradata) {
+                    const uint8_t *ed = in_stream->codecpar->extradata;
+                    if (ed[0] == 1) has_hvcc = 1;
+                }
+                if (has_hvcc) {
+                    out_stream->codecpar->codec_tag = MKTAG('h','v','c','1');
+                    av_log(ffp, AV_LOG_INFO, "🎯 采用HVC1（检测到HVCC）\n");
+                } else {
+                    out_stream->codecpar->codec_tag = MKTAG('h','e','v','1');
+                    av_log(ffp, AV_LOG_INFO, "🎯 采用HEV1（无HVCC/Annex B）\n");
                 }
             }
             
-            // 3. 设置关键帧间隔（通过元数据实现GOP控制）
-            // 注意：AVCodecParameters没有gop_size成员，GOP设置需要在编码器级别处理
+            if (out_stream->codecpar->format == AV_PIX_FMT_YUVJ420P) {
+                out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
+                av_log(ffp, AV_LOG_INFO, "🎯 像素格式从yuvj420p转换为yuv420p (兼容性)\n");
+            }
             
-            // 4. 设置额外标签以提高兼容性
-            av_dict_set(&out_stream->metadata, "handler_name", "VideoHandler", 0);
-            av_dict_set(&out_stream->metadata, "vendor_id", "APPL", 0);
+            out_stream->time_base = in_stream->time_base;
+            av_log(ffp, AV_LOG_INFO, "🎯 H265: 保持原始时间基准 %d/%d\n", 
+                   out_stream->time_base.num, out_stream->time_base.den);
             
-            av_log(ffp, AV_LOG_INFO, "H265兼容性设置完成: Profile=%d, Level=%d, PixFmt=%d, ColorSpace=%d, BitRate=%lld\n",
+            if (out_stream->codecpar->bit_rate == 0 && in_stream->codecpar->bit_rate > 0) {
+                out_stream->codecpar->bit_rate = in_stream->codecpar->bit_rate;
+                av_log(ffp, AV_LOG_INFO, "🎯 H265: 使用原始比特率 %lld bps\n", out_stream->codecpar->bit_rate);
+            }
+            
+            av_log(ffp, AV_LOG_INFO, "🎯 H265兼容性设置完成: Profile=%d, Level=%d, PixFmt=%d, BitRate=%lld\n",
                    out_stream->codecpar->profile, 
                    out_stream->codecpar->level,
                    out_stream->codecpar->format,
-                   out_stream->codecpar->color_space,
                    out_stream->codecpar->bit_rate);
         }
         
@@ -5443,20 +5415,37 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
         }
         
         if (has_hevc) {
-            // H265特殊兼容性设置 - 修复hev1->hvc1标签问题
-            av_dict_set(&options, "brand", "mp41", 0); // 使用mp41 brand以确保H265兼容性
-            av_dict_set(&options, "compatible_brands", "isom,mp41,hvc1", 0); // 只使用hvc1品牌，移除hev1
-            av_dict_set(&options, "tag:v", "hvc1", 0); // 强制使用hvc1标签，解决播放器兼容性
-            av_dict_set(&options, "movflags", "+faststart+use_metadata_tags+frag_keyframe", 0); // 增强兼容性
-            av_log(ffp, AV_LOG_INFO, "H265容器优化: 强制hvc1标签, 移除hev1以修复播放器兼容性问题\n");
+            int is_hev1 = 0;
+            for (i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                if (ffp->m_ofmt_ctx->streams[i]->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                    if (ffp->m_ofmt_ctx->streams[i]->codecpar->extradata_size == 0 ||
+                        (ffp->m_ofmt_ctx->streams[i]->codecpar->extradata && ffp->m_ofmt_ctx->streams[i]->codecpar->extradata[0] != 1)) {
+                        is_hev1 = 1; break;
+                    }
+                }
+            }
+            if (is_hev1) {
+                av_dict_set(&options, "brand", "mp41", 0);
+                av_dict_set(&options, "compatible_brands", "isom,mp41,hev1", 0);
+                av_dict_set(&options, "tag:v", "hev1", 0);
+                av_dict_set(&options, "movflags", "+faststart+use_metadata_tags", 0);
+                av_log(ffp, AV_LOG_INFO, "H265容器优化: 使用HEV1格式（Annex B兼容），确保手机播放兼容性\n");
+            } else {
+                av_dict_set(&options, "brand", "mp41", 0);
+                av_dict_set(&options, "compatible_brands", "isom,mp41,hvc1", 0);
+                av_dict_set(&options, "tag:v", "hvc1", 0);
+                av_dict_set(&options, "movflags", "+faststart+use_metadata_tags+frag_keyframe", 0);
+                av_log(ffp, AV_LOG_INFO, "H265容器优化: 使用HVC1格式（有hvcC元数据）\n");
+            }
         } else {
-            av_dict_set(&options, "brand", "isom", 0); // H264使用标准brand
+            av_dict_set(&options, "brand", "isom", 0);
         }
         
         av_log(ffp, AV_LOG_INFO, "设置MP4兼容性选项以提高播放器支持\n");
     }
     
     // 写视频文件头
+    av_dict_set(&ffp->m_ofmt_ctx->metadata, "language", "eng", 0);
     if (avformat_write_header(ffp->m_ofmt_ctx, &options) < 0) {
         av_log(ffp, AV_LOG_ERROR, "写视频文件头失败：Error occurred when opening output file\n");
         av_dict_free(&options);
@@ -5745,19 +5734,24 @@ int ffp_stop_record(FFPlayer *ffp)
                }
                
                if (is_from_pcm) {
-                   // 从PCMU/PCMA转换的AAC
-                   final_duration_sec = (double)(ffp->audio_frame_count * 160) / 8000.0;
-                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于PCMU/PCMA->AAC: %d帧 × 160样本 ÷ 8000Hz = %.2f秒", 
+                   // 从PCMU/PCMA转换的AAC (兼容性44.1kHz)
+                   final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于PCMU/PCMA->AAC(兼容性): %d帧 × 1024样本 ÷ 44100Hz = %.2f秒", 
                           ffp->audio_frame_count, final_duration_sec);
                } else {
-                   // 原生AAC
-                   final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
-                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 = %.2f秒", ffp->audio_frame_count, final_duration_sec);
+                   // 原生AAC (使用原始采样率)
+                   int sample_rate = audio_stream->codecpar->sample_rate;
+                   if (sample_rate <= 0) sample_rate = 44100; // 默认值
+                   final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
+                   av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
+                          ffp->audio_frame_count, sample_rate, final_duration_sec);
                }
            } else {
-               // 其他音频格式
-               final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
-               av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于标准音频: %d帧 = %.2f秒", ffp->audio_frame_count, final_duration_sec);
+               // 其他音频格式 (使用原始采样率)
+               int sample_rate = audio_stream->codecpar->sample_rate;
+               if (sample_rate <= 0) sample_rate = 44100; // 默认值
+               final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
+               av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于标准音频: %d帧 × 1024样本 ÷ %dHz = %.2f秒", ffp->audio_frame_count, sample_rate, final_duration_sec);
            }
        } else if (ffp->video_frame_count > 0) {
            // 无音频：以视频为准
@@ -6164,28 +6158,40 @@ int ffp_record_file(FFPlayer *ffp, AVPacket *packet) {
             av_log(NULL, AV_LOG_INFO, "[RECORD] 🔊 PCMU/PCMA->AAC转码音频 (输入: %d, 输出: %d)", 
                    in_stream->codecpar->codec_id, out_stream->codecpar->codec_id);
             
-            // PCMU/PCMA: 8kHz, 160样本/帧
-            int samples_per_frame = 160;
-            int input_sample_rate = (in_stream->codecpar->sample_rate > 0) ? in_stream->codecpar->sample_rate : 8000;
+            // 🎯 兼容性设置：PCMU/PCMA转AAC使用44.1kHz
+            int samples_per_frame = 1024; // AAC标准帧大小
+            int output_sample_rate = 44100; // 更兼容的采样率
             
-            // 生成基于原始格式的时间戳
+            // 生成基于兼容性标准的时间戳
             int64_t audio_pts = av_rescale_q(ffp->audio_frame_count * samples_per_frame, 
-                                           (AVRational){1, input_sample_rate}, in_stream->time_base);
+                                           (AVRational){1, output_sample_rate}, in_stream->time_base);
             pkt->pts = audio_pts;
             pkt->dts = audio_pts;
             ffp->audio_frame_count++;
             
-            av_log(NULL, AV_LOG_INFO, "[RECORD] 🎵 PCMU/PCMA帧#%d PTS: %lld (%dHz->44.1kHz)", 
-                   ffp->audio_frame_count, pkt->pts, input_sample_rate);
+            av_log(NULL, AV_LOG_INFO, "[RECORD] 🎵 PCMU/PCMA->AAC帧#%d PTS: %lld (兼容性44.1kHz)", 
+                   ffp->audio_frame_count, pkt->pts);
                    
         } else {
-            // 其他音频格式或直接复制：标准处理
-            int64_t audio_pts = av_rescale_q(ffp->audio_frame_count * 1024, (AVRational){1, 44100}, in_stream->time_base);
-            pkt->pts = audio_pts;
-            pkt->dts = audio_pts;
+            // 🎯 兼容性设置：直接拷贝音频，使用原始时间戳
+            // 保持原始PTS，避免时间戳问题
+            if (pkt->pts != AV_NOPTS_VALUE) {
+                // 使用原始PTS，但确保从0开始
+                if (ffp->audio_frame_count == 0) {
+                    ffp->start_pts = pkt->pts;
+                }
+                pkt->pts = pkt->pts - ffp->start_pts;
+                if (pkt->pts < 0) pkt->pts = 0;
+            } else {
+                // 如果没有PTS，生成基于帧计数的时间戳
+                int64_t audio_pts = av_rescale_q(ffp->audio_frame_count * 1024, 
+                                               (AVRational){1, in_stream->codecpar->sample_rate}, in_stream->time_base);
+                pkt->pts = audio_pts;
+            }
+            pkt->dts = pkt->pts;
             ffp->audio_frame_count++;
             
-            av_log(NULL, AV_LOG_INFO, "[RECORD] 🔊 标准音频帧#%d PTS: %lld", ffp->audio_frame_count, pkt->pts);
+            av_log(NULL, AV_LOG_INFO, "[RECORD] 🔊 直接拷贝音频帧#%d PTS: %lld (原始采样率)", ffp->audio_frame_count, pkt->pts);
         }
     }
     
@@ -7089,31 +7095,51 @@ int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
         // 复制时间基准
         output_stream->time_base = input_stream->time_base;
 
-        // 对H265视频流进行特殊处理
+        // 🎯 手机录制标准：H265视频流特殊处理
         if (i == video_stream_index && input_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
-            av_log(NULL, AV_LOG_INFO, "🔧 修复H265视频流兼容性参数\n");
+            av_log(NULL, AV_LOG_INFO, "🎯 应用兼容性H265参数\n");
 
-            // 设置兼容的codec tag (hvc1而不是hev1)
-            output_stream->codecpar->codec_tag = MKTAG('h','v','c','1');
-
-            // 确保比特率信息存在
-            if (output_stream->codecpar->bit_rate <= 0) {
-                output_stream->codecpar->bit_rate = 2000000; // 默认2Mbps
+            // 🎯 依据HVCC头选择标签：extradata[0]==1 -> hvc1；否则 hev1
+            if (output_stream->codecpar->codec_tag == 0) {
+                int has_hvcc = 0;
+                if (input_stream->codecpar->extradata_size > 0 && input_stream->codecpar->extradata) {
+                    const uint8_t *ed = input_stream->codecpar->extradata;
+                    if (ed[0] == 1) has_hvcc = 1;
+                }
+                if (has_hvcc) {
+                    output_stream->codecpar->codec_tag = MKTAG('h','v','c','1');
+                    av_log(NULL, AV_LOG_INFO, "🎯 重编码采用HVC1（检测到HVCC）\n");
+                } else {
+                    output_stream->codecpar->codec_tag = MKTAG('h','e','v','1');
+                    av_log(NULL, AV_LOG_INFO, "🎯 重编码采用HEV1（无HVCC/Annex B）\n");
+                }
             }
 
-            // 设置Profile和Level（如果缺失）
-            if (output_stream->codecpar->profile == FF_PROFILE_UNKNOWN) {
-                output_stream->codecpar->profile = FF_PROFILE_HEVC_MAIN;
+            // 🎯 兼容性设置：保持原始比特率
+            if (output_stream->codecpar->bit_rate <= 0 && input_stream->codecpar->bit_rate > 0) {
+                output_stream->codecpar->bit_rate = input_stream->codecpar->bit_rate;
             }
-            if (output_stream->codecpar->level == FF_LEVEL_UNKNOWN) {
-                output_stream->codecpar->level = 120; // Level 4.0
-            }
+            
+            av_log(NULL, AV_LOG_INFO, "🎯 H265兼容性设置: Profile=%d, Level=%d, BitRate=%lld\n",
+                   output_stream->codecpar->profile, output_stream->codecpar->level, output_stream->codecpar->bit_rate);
+        }
+        
+        // 🎯 兼容性优先：AAC音频流特殊处理
+        if (i == audio_stream_index && input_stream->codecpar->codec_id == AV_CODEC_ID_AAC) {
+            av_log(NULL, AV_LOG_INFO, "🎯 应用兼容性AAC参数\n");
+            
+            // 🎯 兼容性设置：保持原始采样率，避免兼容性问题
+            av_log(NULL, AV_LOG_INFO, "🎯 AAC兼容性设置: SampleRate=%d, Channels=%d\n",
+                   output_stream->codecpar->sample_rate, output_stream->codecpar->channels);
         }
     }
     
-    // 设置输出格式的兼容性选项
+    // 🎯 手机录制标准：设置MP4元数据
     av_dict_set(&output_ctx->metadata, "compatible_brands", "mp41isom", 0);
     av_dict_set(&output_ctx->metadata, "major_brand", "mp41", 0);
+    av_dict_set(&output_ctx->metadata, "encoder", "IJKPlayer Mobile", 0);
+    av_dict_set(&output_ctx->metadata, "creation_time", "2024-01-01T00:00:00.000000Z", 0);
+    av_dict_set(&output_ctx->metadata, "language", "eng", 0);
     
     // 打开输出文件
     if (!(output_ctx->oformat->flags & AVFMT_NOFILE)) {
@@ -7124,10 +7150,12 @@ int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
         }
     }
     
-    // 设置muxer选项以提高兼容性
+    // 🎯 手机录制标准：设置muxer选项
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "movflags", "faststart", 0); // 优化网络播放
     av_dict_set(&opts, "brand", "mp41", 0); // 设置品牌标识
+    av_dict_set(&opts, "fflags", "genpts", 0); // 生成PTS
+    av_dict_set(&opts, "avoid_negative_ts", "make_zero", 0); // 避免负时间戳
     
     // 写入文件头
     ret = avformat_write_header(output_ctx, &opts);
