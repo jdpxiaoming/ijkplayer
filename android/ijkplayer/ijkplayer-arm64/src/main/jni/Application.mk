@@ -29,4 +29,7 @@ APP_CFLAGS := -O3 -Wall -pipe \
     -ffast-math \
     -fstrict-aliasing -Werror=strict-aliasing \
     -Wno-psabi -Wa,--noexecstack \
-    -DANDROID -DNDEBUG
+    -DANDROID -DNDEBUG \
+    -D_FILE_OFFSET_BITS=64 \
+    -D_LARGEFILE_SOURCE \
+    -D_LARGEFILE64_SOURCE

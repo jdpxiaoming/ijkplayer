@@ -75,6 +75,8 @@
 #include "ijkversion.h"
 #include "ijkplayer.h"
 #include <stdatomic.h>
+#include <stdlib.h>  // 添加posix_memalign支持
+#include <fenv.h>    // 添加浮点环境控制支持
 #if defined(__ANDROID__)
 #include "ijksoundtouch/ijksoundtouch_wrap.h"
 #endif
@@ -616,6 +618,38 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                     case AVMEDIA_TYPE_AUDIO:
                         ret = avcodec_receive_frame(d->avctx, frame);
                         if (ret >= 0) {
+                            // 🔧 ARM64修复：全面检查音频帧的有效性
+                            if (frame->nb_samples <= 0 || frame->sample_rate <= 0) {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ 检测到无效音频帧，跳过\n");
+                                av_frame_unref(frame);
+                                ret = AVERROR(EAGAIN);
+                                break;
+                            }
+                            
+                            // 检查声道数是否合理
+                            if (frame->channels <= 0 || frame->channels > 8) {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ 音频帧声道数异常: %d，跳过\n", frame->channels);
+                                av_frame_unref(frame);
+                                ret = AVERROR(EAGAIN);
+                                break;
+                            }
+                            
+                            // 🔧 ARM64修复：检查采样数是否合理，防止内存越界
+                            if (frame->nb_samples > 8192) {  // 限制最大采样数
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ 音频帧采样数过大: %d，跳过\n", frame->nb_samples);
+                                av_frame_unref(frame);
+                                ret = AVERROR(EAGAIN);
+                                break;
+                            }
+                            
+                            // 🔧 ARM64修复：检查音频数据指针有效性
+                            if (!frame->data[0]) {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ 音频帧数据指针为空，跳过\n");
+                                av_frame_unref(frame);
+                                ret = AVERROR(EAGAIN);
+                                break;
+                            }
+                            
                             AVRational tb = (AVRational){1, frame->sample_rate};
                             if (frame->pts != AV_NOPTS_VALUE)
                                 frame->pts = av_rescale_q(frame->pts, av_codec_get_pkt_timebase(d->avctx), tb);
@@ -624,6 +658,13 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                             if (frame->pts != AV_NOPTS_VALUE) {
                                 d->next_pts = frame->pts + frame->nb_samples;
                                 d->next_pts_tb = tb;
+                            }
+                        } else if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+                            // 🔧 ARM64修复：AAC解码器错误恢复
+                            if (d->avctx->codec_id == AV_CODEC_ID_AAC) {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ AAC解码器错误(%d)，尝试恢复\n", ret);
+                                avcodec_flush_buffers(d->avctx);
+                                ret = AVERROR(EAGAIN);  // 重试
                             }
                         }
                         break;
@@ -814,14 +855,14 @@ static int frame_queue_nb_remaining(FrameQueue *f)
 
 /* return last shown position */
 #ifdef FFP_MERGE
-static int64_t frame_queue_last_pos(FrameQueue *f)
-{
-    Frame *fp = &f->queue[f->rindex];
-    if (f->rindex_shown && fp->serial == f->pktq->serial)
-        return fp->pos;
-    else
-        return -1;
-}
+        static int64_t frame_queue_last_pos(FrameQueue *f)
+        {
+            Frame *fp = &f->queue[f->rindex];
+            if (f->rindex_shown && fp->serial == f->pktq->serial)
+                return fp->pos;
+            else
+                return -1;
+        }
 #endif
 
 static void decoder_abort(Decoder *d, FrameQueue *fq)
@@ -1175,7 +1216,6 @@ static double get_master_clock(VideoState *is)
     }
     return val;
 }
-
 //设置时钟倍速播放或者减速. 
 static void check_external_clock_speed(VideoState *is) {
    if ((is->video_stream >= 0 && is->videoq.nb_packets <= EXTERNAL_CLOCK_MIN_FRAMES) ||
@@ -2037,12 +2077,52 @@ static int audio_thread(void *arg)
     if (!frame)
         return AVERROR(ENOMEM);
 
+    // 🔧 ARM64修复：音频线程安全初始化
+#if defined(__aarch64__) || defined(__arm64__)
+    av_log(ffp, AV_LOG_INFO, "🔧 ARM64：音频线程启动，解码器: %s\n", 
+           is->auddec.avctx ? avcodec_get_name(is->auddec.avctx->codec_id) : "未知");
+    
+    // 验证音频解码器状态
+    if (!is->auddec.avctx) {
+        av_log(ffp, AV_LOG_ERROR, "❌ 音频解码器上下文为空\n");
+        goto the_end;
+        }
+#endif
+
     do {
         ffp_audio_statistic_l(ffp);
         if ((got_frame = decoder_decode_frame(ffp, &is->auddec, frame, NULL)) < 0)
             goto the_end;
-
+        
         if (got_frame) {
+                // 🔧 ARM64修复：额外的音频帧内存安全检查
+#if defined(__aarch64__) || defined(__arm64__)
+                // 验证帧结构完整性
+                if (frame->sample_rate <= 0 || frame->sample_rate > 192000) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 音频线程：采样率异常 %d，跳过帧\n", frame->sample_rate);
+                    av_frame_unref(frame);
+                    continue;
+                }
+                
+                if (frame->nb_samples <= 0 || frame->nb_samples > 8192) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 音频线程：采样数异常 %d，跳过帧\n", frame->nb_samples);
+                    av_frame_unref(frame);
+                    continue;
+                }
+                
+                // 检查内存指针有效性
+                if (!frame->data[0]) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 音频线程：数据指针为空，跳过帧\n");
+                    av_frame_unref(frame);
+                    continue;
+        }
+#endif
+
+                // 🔧 ARM64修复：禁用深拷贝，仅验证
+#if defined(__aarch64__) || defined(__arm64__)
+                // ⚠️ 临时关闭深拷贝，待进一步分析内存破坏原因
+#endif
+
                 tb = (AVRational){1, frame->sample_rate};
                 if (ffp->enable_accurate_seek && is->audio_accurate_seek_req && !is->seek_req) {
                     frame_pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
@@ -2385,7 +2465,6 @@ static int ffplay_video_thread(void *arg)
     av_frame_free(&frame);
     return 0;
 }
-
 static int video_thread(void *arg)
 {
     FFPlayer *ffp = (FFPlayer *)arg;
@@ -2869,17 +2948,29 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     int ret = 0;
     int stream_lowres = ffp->lowres;
 
-    if (stream_index < 0 || stream_index >= ic->nb_streams)
-        return -1;
-    avctx = avcodec_alloc_context3(NULL);
-    if (!avctx)
-        return AVERROR(ENOMEM);
+    // 🔧 添加详细日志追踪
+    av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 开始处理流索引 %d\n", stream_index);
 
+    if (stream_index < 0 || stream_index >= ic->nb_streams) {
+        av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 无效的流索引 %d (总流数: %d)\n", stream_index, ic->nb_streams);
+        return -1;
+    }
+    
+    avctx = avcodec_alloc_context3(NULL);
+    if (!avctx) {
+        av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 无法分配解码器上下文\n");
+        return AVERROR(ENOMEM);
+    }
+
+    av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 复制编解码器参数\n");
     ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar);
-    if (ret < 0)
+    if (ret < 0) {
+        av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 复制编解码器参数失败，错误码: %d\n", ret);
         goto fail;
+    }
     av_codec_set_pkt_timebase(avctx, ic->streams[stream_index]->time_base);
 
+    av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 查找解码器，编解码器ID: %d\n", avctx->codec_id);
     codec = avcodec_find_decoder(avctx->codec_id);
 
     switch (avctx->codec_type) {
@@ -2888,16 +2979,20 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
         case AVMEDIA_TYPE_VIDEO   : is->last_video_stream    = stream_index; forced_codec_name = ffp->video_codec_name; break;
         default: break;
     }
-    if (forced_codec_name)
+    if (forced_codec_name) {
+        av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 使用强制编解码器名称: %s\n", forced_codec_name);
         codec = avcodec_find_decoder_by_name(forced_codec_name);
+    }
     if (!codec) {
-        if (forced_codec_name) av_log(NULL, AV_LOG_WARNING,
-                                      "No codec could be found with name '%s'\n", forced_codec_name);
-        else                   av_log(NULL, AV_LOG_WARNING,
-                                      "No codec could be found with id %d\n", avctx->codec_id);
+        if (forced_codec_name) {
+            av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 找不到名为 '%s' 的编解码器\n", forced_codec_name);
+        } else {
+            av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 找不到ID为 %d 的编解码器\n", avctx->codec_id);
+        }
         ret = AVERROR(EINVAL);
         goto fail;
     }
+    av_log(ffp, AV_LOG_INFO, "✅ stream_component_open: 找到解码器: %s\n", codec->name);
 
     avctx->codec_id = codec->id;
     if(stream_lowres > av_codec_get_max_lowres(codec)){
@@ -2924,11 +3019,15 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
         av_dict_set_int(&opts, "lowres", stream_lowres, 0);
     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO || avctx->codec_type == AVMEDIA_TYPE_AUDIO)
         av_dict_set(&opts, "refcounted_frames", "1", 0);
+    av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 打开解码器\n");
     if ((ret = avcodec_open2(avctx, codec, &opts)) < 0) {
+        av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 打开解码器失败，错误码: %d\n", ret);
         goto fail;
     }
+    av_log(ffp, AV_LOG_INFO, "✅ stream_component_open: 解码器打开成功\n");
+    
     if ((t = av_dict_get(opts, "", NULL, AV_DICT_IGNORE_SUFFIX))) {
-        av_log(NULL, AV_LOG_ERROR, "Option %s not found.\n", t->key);
+        av_log(ffp, AV_LOG_ERROR, "❌ stream_component_open: 选项 %s 未找到\n", t->key);
 #ifdef FFP_MERGE
         ret =  AVERROR_OPTION_NOT_FOUND;
         goto fail;
@@ -2939,6 +3038,45 @@ static int stream_component_open(FFPlayer *ffp, int stream_index)
     ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
     switch (avctx->codec_type) {
     case AVMEDIA_TYPE_AUDIO:
+        // 🔧 ARM64修复：音频解码器初始化优化
+#if defined(__aarch64__) || defined(__arm64__)
+        av_log(ffp, AV_LOG_INFO, "🔧 ARM64架构：初始化音频解码器，应用兼容性配置\n");
+        
+        // 设置ARM64特定的音频解码器参数
+        if (avctx->codec_id == AV_CODEC_ID_AAC) {
+            // 🔧 修复：AAC解码器严格配置，防止内存损坏
+            av_log(ffp, AV_LOG_INFO, "🔧 配置AAC解码器，防止内存损坏\n");
+            
+            // 设置更保守的AAC解码参数，避免内存损坏
+            av_opt_set_int(avctx, "strict", FF_COMPLIANCE_STRICT, 0);  // 使用严格合规性
+            
+            // 禁用可能导致内存问题的特性
+            av_opt_set_int(avctx, "err_detect", AV_EF_EXPLODE, 0);  // 简化错误检测
+            
+            // 强制设置线程数为1，避免多线程竞争
+            avctx->thread_count = 1;
+            avctx->thread_type = 0;  // 禁用多线程
+            
+            // 确保正确的声道布局
+            if (avctx->channel_layout == 0 && avctx->channels > 0) {
+                avctx->channel_layout = av_get_default_channel_layout(avctx->channels);
+                av_log(ffp, AV_LOG_INFO, "🔧 设置默认声道布局: 0x%"PRIx64" (声道数: %d)\n", 
+                       avctx->channel_layout, avctx->channels);
+            }
+            
+            // 确保音频格式正确设置
+            if (avctx->sample_fmt == AV_SAMPLE_FMT_NONE) {
+                avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;  // AAC默认使用浮点格式
+                av_log(ffp, AV_LOG_INFO, "🔧 设置默认采样格式: FLTP\n");
+            }
+            
+            // 设置保守的缓冲区大小
+            // 注意：直接设置 max_samples 在某些FFmpeg版本中可能不可用
+            
+            av_log(ffp, AV_LOG_INFO, "🔧 ARM64架构：AAC解码器安全配置完成（单线程模式）\n");
+        }
+#endif
+
 #if CONFIG_AVFILTER
         {
             AVFilterContext *sink;
@@ -3073,6 +3211,7 @@ fail:
 out:
     av_dict_free(&opts);
 
+    av_log(ffp, AV_LOG_INFO, "🔍 stream_component_open: 函数返回，结果: %d\n", ret);
     return ret;
 }
 
@@ -3115,7 +3254,12 @@ static int read_thread(void *arg)
     AVFormatContext *ic = NULL;
     int err, i, ret;
     int st_index[AVMEDIA_TYPE_NB];
-    AVPacket pkt1, *pkt = &pkt1;
+    AVPacket *pkt = av_packet_alloc();
+    if (!pkt) {
+        av_log(NULL, AV_LOG_FATAL, "Could not allocate AVPacket\n");
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
     int64_t stream_start_time;
     int completed = 0;
     int pkt_in_play_range = 0;
@@ -3165,12 +3309,93 @@ static int read_thread(void *arg)
 
     if (ffp->iformat_name)
         is->iformat = av_find_input_format(ffp->iformat_name);
+    
+    // 🔍 调试：记录 avformat_open_input 调用前的状态
+    av_log(ffp, AV_LOG_INFO, "🔍 准备调用 avformat_open_input\n");
+    av_log(ffp, AV_LOG_INFO, "🔍 文件名: %s\n", is->filename);
+    av_log(ffp, AV_LOG_INFO, "🔍 输入格式: %s\n", is->iformat ? is->iformat->name : "NULL");
+    
+    // 🔧 修复：为网络流设置更大的 probesize 和 analyzeduration（在 avformat_open_input 之前）
+    if (av_stristart(is->filename, "http", NULL) ||
+        av_stristart(is->filename, "https", NULL) ||
+        av_stristart(is->filename, "rtmp", NULL) ||
+        av_stristart(is->filename, "rtsp", NULL)) {
+        
+        // 设置更大的 probesize 和 analyzeduration 以获取完整的流信息
+        av_dict_set_int(&ffp->format_opts, "probesize", 5000000, 0);        // 5MB
+        av_dict_set_int(&ffp->format_opts, "analyzeduration", 10000000, 0);  // 10秒
+        
+        // 🔧 ARM64特殊处理：添加额外的网络流安全选项
+#if defined(__aarch64__) || defined(__arm64__)
+        av_dict_set(&ffp->format_opts, "rw_timeout", "30000000", 0);  // 30秒读写超时
+        av_dict_set(&ffp->format_opts, "reconnect", "1", 0);          // 启用自动重连
+        av_dict_set(&ffp->format_opts, "reconnect_at_eof", "1", 0);   // EOF时重连
+        av_dict_set(&ffp->format_opts, "reconnect_streamed", "1", 0); // 流媒体重连
+        av_dict_set(&ffp->format_opts, "multiple_requests", "1", 0);  // 启用多请求
+        av_log(ffp, AV_LOG_INFO, "🔧 ARM64：添加网络流安全选项\n");
+#endif
+        
+        av_log(ffp, AV_LOG_INFO, "🔧 网络流：设置 probesize=5MB, analyzeduration=10s\n");
+    }
+
+    // 记录 format_opts 字典内容
+    if (ffp->format_opts) {
+        AVDictionaryEntry *entry = NULL;
+        av_log(ffp, AV_LOG_INFO, "🔍 format_opts 字典内容:\n");
+        while ((entry = av_dict_get(ffp->format_opts, "", entry, AV_DICT_IGNORE_SUFFIX))) {
+            av_log(ffp, AV_LOG_INFO, "🔍   %s = %s\n", entry->key, entry->value);
+        }
+    } else {
+        av_log(ffp, AV_LOG_INFO, "🔍 format_opts 为 NULL\n");
+    }
+    
+    // 🔧 ARM64修复：在调用 avformat_open_input 前添加最后的保护
+#if defined(__aarch64__) || defined(__arm64__)
+    av_log(ffp, AV_LOG_INFO, "🔧 ARM64：准备调用 avformat_open_input，添加最后保护\n");
+    
+    // 检查关键指针
+    if (!is || !is->filename) {
+        av_log(ffp, AV_LOG_ERROR, "❌ ARM64：VideoState 或 filename 为空\n");
+        ret = -1;
+        goto fail;
+    }
+    
+    // 检查 FFPlayer 结构
+    if (!ffp) {
+        av_log(ffp, AV_LOG_ERROR, "❌ ARM64：FFPlayer 为空\n");
+        ret = -1;
+        goto fail;
+    }
+    
+    av_log(ffp, AV_LOG_INFO, "🔧 ARM64：所有检查通过，开始调用 avformat_open_input\n");
+#endif
+
     err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
+    
+    // 🔍 调试：记录 avformat_open_input 调用结果
+    av_log(ffp, AV_LOG_INFO, "🔍 avformat_open_input 返回: %d\n", err);
     if (err < 0) {
+        av_log(ffp, AV_LOG_ERROR, "🔍 错误详情: %s\n", av_err2str(err));
         print_error(is->filename, err);
         ret = -1;
         goto fail;
     }
+    
+    // 🔧 ARM64修复：验证AVFormatContext的有效性
+    if (!ic) {
+        av_log(ffp, AV_LOG_ERROR, "❌ avformat_open_input 成功但 ic 为 NULL\n");
+        ret = -1;
+        goto fail;
+    }
+    
+    // 🔧 ARM64修复：验证基本字段
+    if (!ic->iformat) {
+        av_log(ffp, AV_LOG_ERROR, "❌ AVFormatContext.iformat 为 NULL\n");
+        ret = -1;
+        goto fail;
+    }
+    
+    av_log(ffp, AV_LOG_INFO, "✅ AVFormatContext 验证通过，格式: %s\n", ic->iformat->name);
     ffp_notify_msg1(ffp, FFP_MSG_OPEN_INPUT);
 
     if (scan_all_pmts_set)
@@ -3189,6 +3414,7 @@ static int read_thread(void *arg)
         ic->flags |= AVFMT_FLAG_GENPTS;
 
     av_format_inject_global_side_data(ic);
+    
     //
     //AVDictionary **opts;
     //int orig_nb_streams;
@@ -3199,6 +3425,8 @@ static int read_thread(void *arg)
     if (ffp->find_stream_info) {
         AVDictionary **opts = setup_find_stream_info_opts(ic, ffp->codec_opts);
         int orig_nb_streams = ic->nb_streams;
+        int retry_count = 0;
+        const int max_retries = 3;
 
         do {
             if (av_stristart(is->filename, "data:", NULL) && orig_nb_streams > 0) {
@@ -3212,8 +3440,37 @@ static int read_thread(void *arg)
                     break;
                 }
             }
+
+            // 🔧 ARM64修复：增强流信息获取机制
+            av_log(ffp, AV_LOG_INFO, "🔍 尝试获取流信息 (第%d次尝试)\n", retry_count + 1);
             err = avformat_find_stream_info(ic, opts);
-        } while(0);
+
+            if (err < 0 && retry_count < max_retries) {
+                av_log(ffp, AV_LOG_WARNING, "⚠️ 流信息获取失败，错误: %d (%s)\n", err, av_err2str(err));
+
+                // 检查是否为网络流
+                if (av_stristart(is->filename, "http", NULL) ||
+                    av_stristart(is->filename, "https", NULL) ||
+                    av_stristart(is->filename, "rtmp", NULL) ||
+                    av_stristart(is->filename, "rtsp", NULL)) {
+
+                    retry_count++;
+                    av_log(ffp, AV_LOG_INFO, "🔄 网络流重试中... (%d/%d)\n", retry_count, max_retries);
+
+                    // 等待更多数据
+                    SDL_Delay(2000 * retry_count); // 递增等待时间
+
+                    // 重置EOF状态
+                    if (ic->pb) {
+                        ic->pb->eof_reached = 0;
+                    }
+
+                    continue; // 重试
+                }
+            }
+
+            break; // 成功或达到最大重试次数
+        } while(1);
         ffp_notify_msg1(ffp, FFP_MSG_FIND_STREAM_INFO);
 
         for (i = 0; i < orig_nb_streams; i++)
@@ -3222,9 +3479,10 @@ static int read_thread(void *arg)
 
         if (err < 0) {
             av_log(NULL, AV_LOG_WARNING,
-                   "%s: could not find codec parameters\n", is->filename);
-            ret = -1;
-            goto fail;
+                   "%s: could not find codec parameters, error: %d (%s)\n",
+                   is->filename, err, av_err2str(err));
+                        ret = -1;
+                        goto fail;
         }
     }
     if (ic->pb)
@@ -3259,6 +3517,35 @@ static int read_thread(void *arg)
     is->realtime = is_realtime(ic);//= 1;//
 
     av_dump_format(ic, 0, is->filename, 0);
+    
+    // 🔧 修复：添加详细的流信息调试
+    av_log(ffp, AV_LOG_INFO, "🔍 流信息分析：总流数: %d\n", ic->nb_streams);
+    for (i = 0; i < ic->nb_streams; i++) {
+        AVStream *st = ic->streams[i];
+        if (st && st->codecpar) {
+            enum AVMediaType type = st->codecpar->codec_type;
+            enum AVCodecID codec_id = st->codecpar->codec_id;
+            
+            av_log(ffp, AV_LOG_INFO, "🔍 流 %d: 类型=%s, 编解码器=%s", 
+                   i, 
+                   type == AVMEDIA_TYPE_VIDEO ? "视频" : 
+                   type == AVMEDIA_TYPE_AUDIO ? "音频" : 
+                   type == AVMEDIA_TYPE_SUBTITLE ? "字幕" : "未知",
+                   avcodec_get_name(codec_id));
+            
+            if (type == AVMEDIA_TYPE_AUDIO) {
+                av_log(ffp, AV_LOG_INFO, ", 采样率=%d, 声道=%d, 格式=%s",
+                       st->codecpar->sample_rate,
+                       st->codecpar->channels,
+                       av_get_sample_fmt_name(st->codecpar->format));
+            } else if (type == AVMEDIA_TYPE_VIDEO) {
+                av_log(ffp, AV_LOG_INFO, ", 分辨率=%dx%d",
+                       st->codecpar->width,
+                       st->codecpar->height);
+            }
+            av_log(ffp, AV_LOG_INFO, "\n");
+        }
+    }
 
     int video_stream_count = 0;
     int h264_stream_count = 0;
@@ -3291,12 +3578,40 @@ static int read_thread(void *arg)
         st_index[AVMEDIA_TYPE_VIDEO] =
             av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO,
                                 st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
-    if (!ffp->audio_disable)
+    if (!ffp->audio_disable) {
+        // 🔧 修复：增强音频流检测逻辑
         st_index[AVMEDIA_TYPE_AUDIO] =
             av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO,
                                 st_index[AVMEDIA_TYPE_AUDIO],
                                 st_index[AVMEDIA_TYPE_VIDEO],
                                 NULL, 0);
+        
+        // 如果 av_find_best_stream 失败，手动查找音频流
+        if (st_index[AVMEDIA_TYPE_AUDIO] < 0) {
+            av_log(ffp, AV_LOG_WARNING, "⚠️ av_find_best_stream 未找到音频流，尝试手动检测\n");
+            
+            for (i = 0; i < ic->nb_streams; i++) {
+                AVStream *st = ic->streams[i];
+                if (st->codecpar && st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                    // 检查音频流是否有有效的编解码器参数
+                    if (st->codecpar->codec_id != AV_CODEC_ID_NONE &&
+                        st->codecpar->sample_rate > 0 &&
+                        st->codecpar->channels > 0) {
+                        
+                        st_index[AVMEDIA_TYPE_AUDIO] = i;
+                        av_log(ffp, AV_LOG_INFO, "🔧 手动检测到音频流，索引: %d, 编解码器: %s, 采样率: %d, 声道: %d\n",
+                               i, avcodec_get_name(st->codecpar->codec_id),
+                               st->codecpar->sample_rate, st->codecpar->channels);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (st_index[AVMEDIA_TYPE_AUDIO] >= 0) {
+            av_log(ffp, AV_LOG_INFO, "🔍 最终音频流索引: %d\n", st_index[AVMEDIA_TYPE_AUDIO]);
+        }
+    }
     if (!ffp->video_disable && !ffp->subtitle_disable)
         st_index[AVMEDIA_TYPE_SUBTITLE] =
             av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE,
@@ -3319,21 +3634,28 @@ static int read_thread(void *arg)
 
     /* open the streams */
     if (st_index[AVMEDIA_TYPE_AUDIO] >= 0) {
-        stream_component_open(ffp, st_index[AVMEDIA_TYPE_AUDIO]);
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 打开音频流，索引: %d\n", st_index[AVMEDIA_TYPE_AUDIO]);
+        ret = stream_component_open(ffp, st_index[AVMEDIA_TYPE_AUDIO]);
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 音频流打开结果: %d\n", ret);
     } else {
         ffp->av_sync_type = AV_SYNC_VIDEO_MASTER;
         is->av_sync_type  = ffp->av_sync_type;
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 无音频流，设置为视频主同步\n");
     }
 
     ret = -1;
     if (st_index[AVMEDIA_TYPE_VIDEO] >= 0) {
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 打开视频流，索引: %d\n", st_index[AVMEDIA_TYPE_VIDEO]);
         ret = stream_component_open(ffp, st_index[AVMEDIA_TYPE_VIDEO]);
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 视频流打开结果: %d\n", ret);
     }
     if (is->show_mode == SHOW_MODE_NONE)
         is->show_mode = ret >= 0 ? SHOW_MODE_VIDEO : SHOW_MODE_RDFT;
 
     if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0) {
-        stream_component_open(ffp, st_index[AVMEDIA_TYPE_SUBTITLE]);
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 打开字幕流，索引: %d\n", st_index[AVMEDIA_TYPE_SUBTITLE]);
+        ret = stream_component_open(ffp, st_index[AVMEDIA_TYPE_SUBTITLE]);
+        av_log(ffp, AV_LOG_INFO, "🔍 read_thread: 字幕流打开结果: %d\n", ret);
     }
     ffp_notify_msg1(ffp, FFP_MSG_COMPONENT_OPEN);
 
@@ -3352,8 +3674,8 @@ static int read_thread(void *arg)
     if (is->video_stream < 0 && is->audio_stream < 0) {
         av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filtergraph\n",
                is->filename);
-        ret = -1;
-        goto fail;
+                ret = -1;
+                goto fail;
     }
     if (is->audio_stream >= 0) {
         is->audioq.is_buffer_indicator = 1;
@@ -3559,6 +3881,7 @@ static int read_thread(void *arg)
                 }
             }
         }
+        av_packet_unref(&pkt1);
         pkt->flags = 0;
         ret = av_read_frame(ic, pkt);
         
@@ -3678,7 +4001,7 @@ static int read_thread(void *arg)
         } else {
             av_log(NULL, AV_LOG_INFO, "[READ_THREAD] 丢弃包 - 流: %d, 原因: %s", pkt->stream_index,
                    !pkt_in_play_range ? "不在播放范围" : "未知流类型");
-            av_packet_unref(pkt);
+            av_packet_unref(&pkt1);
         }
 
         ffp_statistic_l(ffp);
@@ -3719,6 +4042,7 @@ static int read_thread(void *arg)
     if (ic && !is->ic)
         avformat_close_input(&ic);
 
+    av_packet_free(&pkt);
     if (!ffp->prepared || !is->abort_request) {
         ffp->last_error = last_error;
         ffp_notify_msg2(ffp, FFP_MSG_ERROR, last_error);
@@ -4064,7 +4388,6 @@ static const char *ijk_version_info()
 {
     return IJKPLAYER_VERSION;
 }
-
 FFPlayer *ffp_create()
 {
     av_log(NULL, AV_LOG_INFO, "av_version_info: %s\n", av_version_info());
@@ -4712,7 +5035,6 @@ void ffp_audio_statistic_l(FFPlayer *ffp)
     VideoState *is = ffp->is;
     ffp_track_statistic_l(ffp, is->audio_st, &is->audioq, &ffp->stat.audio_cache);
 }
-
 void ffp_video_statistic_l(FFPlayer *ffp)
 {
     VideoState *is = ffp->is;
@@ -7065,39 +7387,11 @@ end:
     ffp->need_transcode = 0;
     return -1;
 }
-// 修复Android 15播放速度问题的辅助函数
-static void fix_android15_playback_speed(FFPlayer *ffp) {
-    if (!ffp || !ffp->m_ofmt_ctx)
-        return;
-        
-    // 只处理MP4容器
-    if (strcmp(ffp->m_ofmt->name, "mp4") != 0)
-        return;
-        
-    av_log(ffp, AV_LOG_INFO, "Applying Android 15 playback speed fix");
-    
-    // 设置所有流的时间基准和帧率
-    for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-        AVStream *stream = ffp->m_ofmt_ctx->streams[i];
-        
-        // 统一时间基准为90000Hz
-        stream->time_base = (AVRational){1, 90000};
-        
-        // 为视频流设置正确的帧率
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            stream->r_frame_rate = (AVRational){30, 1};  // 30fps
-            stream->avg_frame_rate = (AVRational){30, 1};
-            av_log(ffp, AV_LOG_INFO, "Setting video stream %d frame rate to 30fps", i);
-        }
-        
-        av_log(ffp, AV_LOG_INFO, "Setting stream %d time base to 1/90000", i);
-    }
-}
 //文件转码为h265.
 int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
     AVFormatContext *input_ctx = NULL;
     AVFormatContext *output_ctx = NULL;
-    AVPacket packet;
+    AVPacket pkt1, *pkt = &pkt1;
     int video_stream_index = -1;
     int audio_stream_index = -1;
     int ret = 0;
@@ -7235,81 +7529,81 @@ int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
     av_log(NULL, AV_LOG_INFO, "✅ 开始Stream Copy处理\n");
     
     // 🔧 关键修复：H265 Stream Copy时需要特殊处理时间戳
-    av_init_packet(&packet);
+    av_init_packet(pkt);
     int64_t start_pts = AV_NOPTS_VALUE;
     int64_t start_dts = AV_NOPTS_VALUE;
     int packet_count = 0;
     
-    while (av_read_frame(input_ctx, &packet) >= 0) {
-        AVStream *input_stream = input_ctx->streams[packet.stream_index];
-        AVStream *output_stream = output_ctx->streams[packet.stream_index];
+    while (av_read_frame(input_ctx, pkt) >= 0) {
+        AVStream *input_stream = input_ctx->streams[pkt->stream_index];
+        AVStream *output_stream = output_ctx->streams[pkt->stream_index];
 
         packet_count++;
 
         // 🚨 H265关键修复：设置时间戳偏移基准
-        if (start_pts == AV_NOPTS_VALUE && packet.pts != AV_NOPTS_VALUE) {
-            start_pts = packet.pts;
-            av_log(NULL, AV_LOG_INFO, "🎯 H265重编码: 设置PTS基准 %lld (流%d)\n", start_pts, packet.stream_index);
+        if (start_pts == AV_NOPTS_VALUE && pkt->pts != AV_NOPTS_VALUE) {
+            start_pts = pkt->pts;
+            av_log(NULL, AV_LOG_INFO, "🎯 H265重编码: 设置PTS基准 %lld (流%d)\n", start_pts, pkt->stream_index);
         }
-        if (start_dts == AV_NOPTS_VALUE && packet.dts != AV_NOPTS_VALUE) {
-            start_dts = packet.dts;
-            av_log(NULL, AV_LOG_INFO, "🎯 H265重编码: 设置DTS基准 %lld (流%d)\n", start_dts, packet.stream_index);
+        if (start_dts == AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE) {
+            start_dts = pkt->dts;
+            av_log(NULL, AV_LOG_INFO, "🎯 H265重编码: 设置DTS基准 %lld (流%d)\n", start_dts, pkt->stream_index);
         }
 
         // 🔧 重要修复：重置时间戳为从0开始，避免大数值导致异常时长
-        if (packet.pts != AV_NOPTS_VALUE && start_pts != AV_NOPTS_VALUE) {
-            int64_t original_pts = packet.pts;
-            packet.pts = packet.pts - start_pts;
-            if (packet.pts < 0) packet.pts = 0;
+        if (pkt->pts != AV_NOPTS_VALUE && start_pts != AV_NOPTS_VALUE) {
+            int64_t original_pts = pkt->pts;
+            pkt->pts = pkt->pts - start_pts;
+            if (pkt->pts < 0) pkt->pts = 0;
 
             if (packet_count <= 5) { // 只记录前几个包的调试信息
                 av_log(NULL, AV_LOG_INFO, "🔧 H265重编码PTS: %lld -> %lld (偏移:%lld)\n", 
-                       original_pts, packet.pts, start_pts);
+                       original_pts, pkt->pts, start_pts);
             }
         }
 
-        if (packet.dts != AV_NOPTS_VALUE && start_dts != AV_NOPTS_VALUE) {
-            int64_t original_dts = packet.dts;
-            packet.dts = packet.dts - start_dts;
-            if (packet.dts < 0) packet.dts = 0;
+        if (pkt->dts != AV_NOPTS_VALUE && start_dts != AV_NOPTS_VALUE) {
+            int64_t original_dts = pkt->dts;
+            pkt->dts = pkt->dts - start_dts;
+            if (pkt->dts < 0) pkt->dts = 0;
 
             if (packet_count <= 5) {
                 av_log(NULL, AV_LOG_INFO, "🔧 H265重编码DTS: %lld -> %lld (偏移:%lld)\n", 
-                       original_dts, packet.dts, start_dts);
+                       original_dts, pkt->dts, start_dts);
             }
         }
 
         // 转换时间戳到输出时间基准
-        av_packet_rescale_ts(&packet, input_stream->time_base, output_stream->time_base);
-        packet.pos = -1;
+        av_packet_rescale_ts(pkt, input_stream->time_base, output_stream->time_base);
+        pkt->pos = -1;
 
         // 🔧 验证转换后的时间戳合理性
         if (input_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && 
             input_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
-            double pts_seconds = (double)packet.pts * output_stream->time_base.num / output_stream->time_base.den;
+            double pts_seconds = (double)pkt->pts * output_stream->time_base.num / output_stream->time_base.den;
             // if (pts_seconds > 60.0) { // 超过1分钟认为异常
             //     av_log(NULL, AV_LOG_ERROR, "🚨 H265重编码发现异常PTS: %lld (%.2fs) - 包#%d\n", 
-            //            packet.pts, pts_seconds, packet_count);
+            //            pkt->pts, pts_seconds, packet_count);
             //     av_log(NULL, AV_LOG_ERROR, "🚨 这可能导致视频时长异常！跳过此包\n");
-            //     av_packet_unref(&packet);
+            //     av_packet_unref(pkt);
             //     continue; // 跳过异常包
             // }
 
             if (packet_count <= 10) {
                 av_log(NULL, AV_LOG_DEBUG, "📊 H265重编码包#%d: PTS=%lld (%.3fs)\n", 
-                       packet_count, packet.pts, pts_seconds);
+                       packet_count, pkt->pts, pts_seconds);
             }
         }
 
         // 写入包
-        ret = av_interleaved_write_frame(output_ctx, &packet);
+        ret = av_interleaved_write_frame(output_ctx, pkt);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "❌ 写入帧失败\n");
-            av_packet_unref(&packet);
+            av_packet_unref(pkt);
             break;
         }
 
-        av_packet_unref(&packet);
+        av_packet_unref(pkt);
     }
     
     av_log(NULL, AV_LOG_INFO, "✅ H265重编码处理了 %d 个数据包\n", packet_count);
@@ -7331,6 +7625,6 @@ cleanup:
             avformat_free_context(output_ctx);
         }
         if (input_ctx) avformat_close_input(&input_ctx);
-        
+
         return ret;
 }

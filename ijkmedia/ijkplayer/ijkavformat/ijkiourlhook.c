@@ -117,26 +117,66 @@ fail:
 
 static int ijkio_urlhook_reconnect(IjkURLContext *h, IjkAVDictionary *extra)
 {
+    // 🔧 ARM64修复：增强参数验证
+    if (!h || !h->priv_data) {
+        return -1;
+    }
+    
     Context *c = h->priv_data;
     int ret = 0;
     IjkURLContext *new_url = NULL;
     IjkAVDictionary *inner_options = NULL;
 
+    // 🔧 ARM64修复：验证关键字段
+    if (!c->inner_options) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：inner_options 为空\n");
+        return -1;
+    }
+    
+    if (!c->app_io_ctrl.url[0]) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：URL 为空\n");
+        return -1;
+    }
+    
+    av_log(NULL, AV_LOG_INFO, "🔧 ARM64：开始重连到 URL: %s\n", c->app_io_ctrl.url);
+
     c->test_fail_point_next += c->test_fail_point;
 
-    assert(c->inner_options);
     ijk_av_dict_copy(&inner_options, c->inner_options, 0);
     if (extra)
         ijk_av_dict_copy(&inner_options, extra, 0);
 
     ret = ijkio_alloc_url(&new_url, c->app_io_ctrl.url);
-    new_url->ijkio_app_ctx = c->ijkio_app_ctx;
-    if (ret)
+    if (ret) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：分配 URL 失败: %d\n", ret);
         goto fail0;
+    }
+    
+    // 🔧 ARM64修复：验证分配的 URL 上下文
+    if (!new_url) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：new_url 为空\n");
+        ret = -1;
+        goto fail0;
+    }
+    
+    new_url->ijkio_app_ctx = c->ijkio_app_ctx;
+    av_log(NULL, AV_LOG_INFO, "🔧 ARM64：URL 分配成功，准备打开连接\n");
 
-    ret = new_url->prot->url_open2(new_url, c->app_io_ctrl.url, c->inner_flags, &inner_options);
-    if (ret)
+    // 🔧 ARM64修复：在调用 url_open2 前验证所有参数
+    if (!new_url->prot || !new_url->prot->url_open2) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：protocol 或 url_open2 为空\n");
+        ret = -1;
         goto fail1;
+    }
+    
+    av_log(NULL, AV_LOG_INFO, "🔧 ARM64：准备调用 url_open2\n");
+    ret = new_url->prot->url_open2(new_url, c->app_io_ctrl.url, c->inner_flags, &inner_options);
+    av_log(NULL, AV_LOG_INFO, "🔧 ARM64：url_open2 返回: %d\n", ret);
+    
+    if (ret) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：url_open2 失败: %d\n", ret);
+        goto fail1;
+    }
 
     if (c->inner) {
         c->inner->prot->url_close(c->inner);
@@ -165,6 +205,11 @@ fail0:
 
 static int ijkio_urlhook_init(IjkURLContext *h, const char *arg, int flags, IjkAVDictionary **options)
 {
+    // 🔧 ARM64修复：参数验证
+    if (!h || !h->priv_data || !arg) {
+        return -1;
+    }
+    
     Context *c = h->priv_data;
     int ret = 0;
 
@@ -260,9 +305,24 @@ static int ijkio_httphook_reconnect_at(IjkURLContext *h, int64_t offset)
 
 static int ijkio_httphook_open(IjkURLContext *h, const char *arg, int flags, IjkAVDictionary **options)
 {
+    // 🔧 ARM64修复：增强参数验证
+    if (!h) {
+        return -1;
+    }
+    
+    if (!h->priv_data) {
+        return -1;
+    }
+    
     Context *c = h->priv_data;
     int ret = 0;
     IjkAVDictionaryEntry *t = NULL;
+    
+    // 🔧 ARM64修复：验证关键结构指针
+    if (!h->ijkio_app_ctx) {
+        goto fail;
+    }
+    
     c->ijkio_app_ctx = h->ijkio_app_ctx;
     c->ijkio_interrupt_callback = h->ijkio_app_ctx->ijkio_interrupt_callback;
 
@@ -292,9 +352,31 @@ static int ijkio_httphook_open(IjkURLContext *h, const char *arg, int flags, Ijk
     if (ret)
         goto fail;
 
+    // 🔧 ARM64修复：在重连前添加安全检查
+#if defined(__aarch64__) || defined(__arm64__)
+    av_log(NULL, AV_LOG_INFO, "🔧 ARM64：准备进行 HTTP 连接\n");
+    
+    // 验证关键结构
+    if (!c || !h) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：Context 或 URLContext 为空\n");
+        ret = -1;
+        goto fail;
+    }
+    
+    if (!c->app_ctx) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：ApplicationContext 为空\n");
+        ret = -1;
+        goto fail;
+    }
+#endif
+
     ret = ijkio_urlhook_reconnect(h, NULL);
 
-    while (ret && c->abort_request == 0) {
+    // 🔧 ARM64修复：限制重试次数，防止无限循环
+    int retry_limit = 3;
+    int retry_count = 0;
+    
+    while (ret && c->abort_request == 0 && retry_count < retry_limit) {
         int inject_ret = 0;
 
         switch (ret) {
@@ -303,6 +385,10 @@ static int ijkio_httphook_open(IjkURLContext *h, const char *arg, int flags, Ijk
         }
 
         c->app_io_ctrl.retry_counter++;
+        retry_count++;
+        
+        av_log(NULL, AV_LOG_INFO, "🔧 ARM64：HTTP 重连尝试 %d/%d\n", retry_count, retry_limit);
+        
         inject_ret = ijkio_urlhook_call_inject(h);
         if (inject_ret) {
             ret = IJKAVERROR_EXIT;
@@ -315,6 +401,12 @@ static int ijkio_httphook_open(IjkURLContext *h, const char *arg, int flags, Ijk
         av_log(NULL, AV_LOG_INFO, "%s: will reconnect at start\n", __func__);
         ret = ijkio_httphook_reconnect_at(h, 0);
         av_log(NULL, AV_LOG_INFO, "%s: did reconnect at start: %d\n", __func__, ret);
+    }
+    
+    // 🔧 ARM64修复：如果超过重试限制，返回错误
+    if (retry_count >= retry_limit && ret) {
+        av_log(NULL, AV_LOG_ERROR, "❌ ARM64：HTTP 连接重试次数超限\n");
+        goto fail;
     }
 
 fail:
