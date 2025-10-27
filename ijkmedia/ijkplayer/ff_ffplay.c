@@ -6215,6 +6215,12 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         return 0;
     }
     
+    // 🔧 检查录制错误状态，避免在出错后继续写入
+    if (ffp->record_error) {
+        av_log(ffp, AV_LOG_DEBUG, "⚠️ 录制已出错，跳过写入\n");
+        return -1;
+    }
+    
     VideoState *is = ffp->is;
     int in_stream_index = packet->stream_index;
     
@@ -6378,8 +6384,24 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                    ffp->audio_frame_count, pts_before_write, pkt.pts);
         }
     } else {
-        av_log(ffp, AV_LOG_ERROR, "❌ 录制失败: %s, PTS=%lld, DTS=%lld\n", 
-               av_err2str(ret), pts_before_write, dts_before_write);
+        // 🔧 详细的错误诊断
+        const char* error_msg = av_err2str(ret);
+        av_log(ffp, AV_LOG_ERROR, "❌ 录制失败: %s (错误代码:%d), PTS=%lld, DTS=%lld\n", 
+               error_msg, ret, pts_before_write, dts_before_write);
+        
+        // 🔍 针对I/O错误提供更多诊断信息
+        if (ret == AVERROR(EIO) || ret == AVERROR(ENOSPC) || ret == AVERROR(EACCES)) {
+            if (ret == AVERROR(ENOSPC)) {
+                av_log(ffp, AV_LOG_ERROR, "💾 存储空间不足！请检查设备存储空间\n");
+            } else if (ret == AVERROR(EACCES)) {
+                av_log(ffp, AV_LOG_ERROR, "🔒 文件权限错误！请检查录制路径的写入权限\n");
+            } else {
+                av_log(ffp, AV_LOG_ERROR, "💿 I/O错误！可能是存储设备故障或文件系统错误\n");
+            }
+            
+            // 设置录制错误标志，停止后续写入
+            ffp->record_error = 1;
+        }
     }
     
     av_packet_unref(&pkt);
