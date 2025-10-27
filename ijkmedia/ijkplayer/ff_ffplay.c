@@ -151,6 +151,7 @@
 // 录制相关函数声明
 static void fix_android15_recording_compatibility(FFPlayer *ffp);
 static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
+static void ffp_reset_record_static_state(void);
  
  static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
  {
@@ -587,8 +588,22 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
  
                  switch (d->avctx->codec_type) {
                      case AVMEDIA_TYPE_VIDEO:
-                         // Special handling for HEVC (H.265) to prevent assertion failures
+                        // Special handling for HEVC (H.265) to prevent assertion failures and Android 15 black screen
                          if (d->avctx->codec_id == AV_CODEC_ID_HEVC) {
+                            // 🔧 Android 15 H.265黑屏修复：确保色彩空间正确
+                            if (d->avctx->color_range == AVCOL_RANGE_UNSPECIFIED) {
+                                d->avctx->color_range = AVCOL_RANGE_MPEG;  // TV范围
+                            }
+                            if (d->avctx->colorspace == AVCOL_SPC_UNSPECIFIED) {
+                                d->avctx->colorspace = AVCOL_SPC_BT709;  // BT.709色彩空间
+                            }
+                            if (d->avctx->color_primaries == AVCOL_PRI_UNSPECIFIED) {
+                                d->avctx->color_primaries = AVCOL_PRI_BT709;
+                            }
+                            if (d->avctx->color_trc == AVCOL_TRC_UNSPECIFIED) {
+                                d->avctx->color_trc = AVCOL_TRC_BT709;
+                            }
+                            
                              // For HEVC, use a more careful approach to avoid assertion failures
                              ret = avcodec_receive_frame(d->avctx, frame);
                              
@@ -597,6 +612,20 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                                  avcodec_flush_buffers(d->avctx);
                                  ret = AVERROR(EAGAIN);
                              } else if (ret >= 0) {
+                                // 🔧 Android 15修复：确保输出帧的色彩空间正确
+                                if (frame->color_range == AVCOL_RANGE_UNSPECIFIED) {
+                                    frame->color_range = AVCOL_RANGE_MPEG;
+                                }
+                                if (frame->colorspace == AVCOL_SPC_UNSPECIFIED) {
+                                    frame->colorspace = AVCOL_SPC_BT709;
+                                }
+                                if (frame->color_primaries == AVCOL_PRI_UNSPECIFIED) {
+                                    frame->color_primaries = AVCOL_PRI_BT709;
+                                }
+                                if (frame->color_trc == AVCOL_TRC_UNSPECIFIED) {
+                                    frame->color_trc = AVCOL_TRC_BT709;
+                                }
+                                
                                  ffp->stat.vdps = SDL_SpeedSamplerAdd(&ffp->vdps_sampler, FFP_SHOW_VDPS_AVCODEC, "vdps[avcodec]");
                                  if (ffp->decoder_reorder_pts == -1) {
                                      frame->pts = frame->best_effort_timestamp;
@@ -3135,8 +3164,8 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
      VideoState *is = ffp->is;
      AVFormatContext *ic = NULL;
      int err, i, ret;
-    int st_index[AVMEDIA_TYPE_NB];
-    AVPacket pkt1, *pkt = &pkt1;
+     int st_index[AVMEDIA_TYPE_NB];
+     AVPacket pkt1, *pkt = &pkt1;
     
     // 🔧 修复：初始化 st_index 数组
     for (i = 0; i < AVMEDIA_TYPE_NB; i++) {
@@ -3661,12 +3690,30 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
              is->eof = 0;
          }
  
-        // 🔧 优化录制逻辑：最小化对正常播放的影响
-        if (ffp->is_record) {
-            // 快速检查：只处理音视频包，避免复杂判断
-            if (pkt->stream_index == is->video_stream || pkt->stream_index == is->audio_stream) {
-                // 非阻塞录制：使用独立线程处理，不影响主播放流程
-                ffp_record_file_async(ffp, pkt);
+       // 🔧 优化录制逻辑：最小化对正常播放的影响
+       if (ffp->is_record && ffp->m_ofmt_ctx && ffp->stream_mapping) {
+           // 🔧 关键修复：检查流类型而不是特定索引，确保所有音视频包都被录制
+           if (pkt->stream_index >= 0 && pkt->stream_index < ic->nb_streams) {
+               AVStream *stream = ic->streams[pkt->stream_index];
+               if (stream && stream->codecpar && 
+                   (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO || 
+                    stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)) {
+                   
+                   // 检查是否有对应的输出流映射
+                   if (ffp->stream_mapping[pkt->stream_index] >= 0) {
+                       // 非阻塞录制：使用独立线程处理，不影响主播放流程
+                       ffp_record_file_async(ffp, pkt);
+                       
+                       // 🔍 调试日志：确认录制调用
+                       if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                           av_log(ffp, AV_LOG_DEBUG, "🎬 录制视频包: 流%d, PTS=%lld\n", 
+                                  pkt->stream_index, pkt->pts);
+             } else {
+                           av_log(ffp, AV_LOG_DEBUG, "🔊 录制音频包: 流%d, PTS=%lld\n", 
+                                  pkt->stream_index, pkt->pts);
+                       }
+                   }
+               }
              }
          }
  
@@ -4145,7 +4192,7 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
     if (ffp->record_mutex_initialized) {
         pthread_mutex_destroy(&ffp->record_mutex);
         ffp->record_mutex_initialized = 0;
-    }
+     }
  
      av_free(ffp);
  }
@@ -5179,7 +5226,7 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
      ffp->is_record = 0;
      ffp->record_error = 0;
      ffp->is_first = 0;
-     ffp->waiting_for_keyframe = 0;
+    ffp->waiting_for_keyframe = 1; // 🔧 H265修复：开始录制时等待关键帧
      ffp->record_first_vpts = AV_NOPTS_VALUE;
      ffp->stream_mapping = NULL;
      ffp->nb_output_streams = 0;
@@ -5277,28 +5324,28 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
          av_dict_set(&out_stream->metadata, "language", "eng", 0);
          
                 
-        // 🔧 关键修复：录制时的音频格式转换（不影响播放）
-        if (in_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+         // 🔧 关键修复：录制时的音频格式转换（不影响播放）
+         if (in_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             // 🎯 智能音频处理策略：PCMA/PCMU转AAC，其他格式直接复制
-            int need_transcode = (in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
-                                 in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW);
-            
+                 int need_transcode = (in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || 
+                                      in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW);
+                 
             if (need_transcode && strstr(file_name, ".mp4")) {
                 av_log(ffp, AV_LOG_INFO, "🔊 检测到PCMA/PCMU音频，启用AAC转码 - 原始codec: %s", 
                        avcodec_get_name(in_codecpar->codec_id));
-                ffp->enable_pcm_to_aac_transcode = 1;
+                     ffp->enable_pcm_to_aac_transcode = 1;
                      
-                // 初始化解码器（PCMU/PCMA）
-                const AVCodec *dec = avcodec_find_decoder(in_codecpar->codec_id);
-                if (!dec) { av_log(ffp, AV_LOG_ERROR, "找不到音频解码器\n"); goto end; }
-                ffp->audio_dec_ctx_record = avcodec_alloc_context3(dec);
-                if (!ffp->audio_dec_ctx_record) { av_log(ffp, AV_LOG_ERROR, "无法分配音频解码上下文\n"); goto end; }
-                if (avcodec_parameters_to_context(ffp->audio_dec_ctx_record, in_codecpar) < 0) { av_log(ffp, AV_LOG_ERROR, "参数复制到解码上下文失败\n"); goto end; }
-                if (avcodec_open2(ffp->audio_dec_ctx_record, dec, NULL) < 0) { av_log(ffp, AV_LOG_ERROR, "打开音频解码器失败\n"); goto end; }
-                
-                // 初始化AAC编码器
-                const AVCodec *enc = avcodec_find_encoder(AV_CODEC_ID_AAC);
-                if (!enc) { av_log(ffp, AV_LOG_ERROR, "找不到AAC编码器\n"); goto end; }
+                     // 初始化解码器（PCMU/PCMA）
+                     const AVCodec *dec = avcodec_find_decoder(in_codecpar->codec_id);
+                     if (!dec) { av_log(ffp, AV_LOG_ERROR, "找不到音频解码器\n"); goto end; }
+                     ffp->audio_dec_ctx_record = avcodec_alloc_context3(dec);
+                     if (!ffp->audio_dec_ctx_record) { av_log(ffp, AV_LOG_ERROR, "无法分配音频解码上下文\n"); goto end; }
+                     if (avcodec_parameters_to_context(ffp->audio_dec_ctx_record, in_codecpar) < 0) { av_log(ffp, AV_LOG_ERROR, "参数复制到解码上下文失败\n"); goto end; }
+                     if (avcodec_open2(ffp->audio_dec_ctx_record, dec, NULL) < 0) { av_log(ffp, AV_LOG_ERROR, "打开音频解码器失败\n"); goto end; }
+                     
+                     // 初始化AAC编码器
+                     const AVCodec *enc = avcodec_find_encoder(AV_CODEC_ID_AAC);
+                     if (!enc) { av_log(ffp, AV_LOG_ERROR, "找不到AAC编码器\n"); goto end; }
                      ffp->audio_enc_ctx = avcodec_alloc_context3(enc);
                      if (!ffp->audio_enc_ctx) { av_log(ffp, AV_LOG_ERROR, "无法分配AAC编码上下文\n"); goto end; }
                      
@@ -5332,7 +5379,7 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                      if (avcodec_parameters_from_context(out_stream->codecpar, ffp->audio_enc_ctx) < 0) { av_log(ffp, AV_LOG_ERROR, "从编码器复制参数失败\n"); goto end; }
                      out_stream->time_base = ffp->audio_enc_ctx->time_base;
                      av_log(ffp, AV_LOG_INFO, "🎵 已启用真实AAC转码: 44100Hz 单声道 128kbps\n");
-            } else {
+                } else {
                 // 🎯 其他音频格式：直接复制，不转码
                 av_log(ffp, AV_LOG_INFO, "🎵 其他音频格式(%s)：直接复制，保持原始参数", 
                        avcodec_get_name(in_codecpar->codec_id));
@@ -5343,27 +5390,27 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                     av_log(ffp, AV_LOG_ERROR, "Failed to copy audio codec parameters\n");
                     goto end;
                 }
-                
-                // 🔧 关键修复：确保通道布局信息完整
-                if (out_stream->codecpar->channel_layout == 0 && out_stream->codecpar->channels > 0) {
-                    out_stream->codecpar->channel_layout = av_get_default_channel_layout(out_stream->codecpar->channels);
-                    av_log(ffp, AV_LOG_INFO, "🔧 修复通道布局: %d通道 -> 0x%llx", 
-                           out_stream->codecpar->channels, out_stream->codecpar->channel_layout);
-                }
-                
-                // 🔧 确保采样率有效
-                if (out_stream->codecpar->sample_rate <= 0) {
-                    out_stream->codecpar->sample_rate = 44100;  // 默认采样率
-                    av_log(ffp, AV_LOG_WARNING, "🔧 修复采样率: 设置为44100Hz");
-                }
+                    
+                    // 🔧 关键修复：确保通道布局信息完整
+                    if (out_stream->codecpar->channel_layout == 0 && out_stream->codecpar->channels > 0) {
+                        out_stream->codecpar->channel_layout = av_get_default_channel_layout(out_stream->codecpar->channels);
+                        av_log(ffp, AV_LOG_INFO, "🔧 修复通道布局: %d通道 -> 0x%llx", 
+                               out_stream->codecpar->channels, out_stream->codecpar->channel_layout);
+                    }
+                    
+                    // 🔧 确保采样率有效
+                    if (out_stream->codecpar->sample_rate <= 0) {
+                        out_stream->codecpar->sample_rate = 44100;  // 默认采样率
+                        av_log(ffp, AV_LOG_WARNING, "🔧 修复采样率: 设置为44100Hz");
+                    }
                     
                 av_log(ffp, AV_LOG_INFO, "🎵 其他音频格式配置 - 采样率:%d, 通道数:%d, 通道布局:0x%llx", 
-                       out_stream->codecpar->sample_rate, out_stream->codecpar->channels, out_stream->codecpar->channel_layout);
-                
-                // 保持原始时间基准，不强制修改
-                out_stream->time_base = in_stream->time_base;
-            }
-        } else {
+                           out_stream->codecpar->sample_rate, out_stream->codecpar->channels, out_stream->codecpar->channel_layout);
+                    
+                    // 保持原始时间基准，不强制修改
+                    out_stream->time_base = in_stream->time_base;
+             }
+         } else {
              // 视频流处理
              if (avcodec_parameters_copy(out_stream->codecpar, in_codecpar) < 0) {
                  av_log(ffp, AV_LOG_ERROR, "Failed to copy video codec parameters\n");
@@ -5380,6 +5427,28 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
              in_codecpar->codec_id == AV_CODEC_ID_HEVC) {
              
              av_log(ffp, AV_LOG_INFO, "🎯 检测到H265视频流，应用兼容性设置\n");
+            
+            // 🔧 关键修复：强制使用兼容的像素格式和色彩空间
+            out_stream->codecpar->format = AV_PIX_FMT_YUV420P;  // 强制使用标准YUV420P
+            out_stream->codecpar->color_range = AVCOL_RANGE_MPEG;  // 使用MPEG色彩范围（TV范围）
+            out_stream->codecpar->color_primaries = AVCOL_PRI_BT709;  // BT.709色彩空间
+            out_stream->codecpar->color_trc = AVCOL_TRC_BT709;  // BT.709传输特性
+            out_stream->codecpar->color_space = AVCOL_SPC_BT709;  // BT.709色彩空间
+            
+            av_log(ffp, AV_LOG_INFO, "🎯 强制设置兼容色彩空间: YUV420P + BT.709 + MPEG范围\n");
+            
+            // 🔧 Android 15兼容性：限制Profile和Level
+            if (out_stream->codecpar->profile == FF_PROFILE_UNKNOWN || 
+                out_stream->codecpar->profile > FF_PROFILE_HEVC_MAIN) {
+                out_stream->codecpar->profile = FF_PROFILE_HEVC_MAIN;  // 使用Main Profile
+                av_log(ffp, AV_LOG_INFO, "🔧 限制H265 Profile为Main（兼容性）\n");
+            }
+            
+            if (out_stream->codecpar->level == FF_LEVEL_UNKNOWN || 
+                out_stream->codecpar->level > 120) {  // Level 4.0 = 120
+                out_stream->codecpar->level = 120;  // 限制为Level 4.0
+                av_log(ffp, AV_LOG_INFO, "🔧 限制H265 Level为4.0（兼容性）\n");
+            }
              
              // 🎯 依据HVCC头选择标签：extradata[0]==1 -> hvc1；否则 hev1
              if (out_stream->codecpar->codec_tag == 0) {
@@ -5388,23 +5457,44 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                      const uint8_t *ed = in_stream->codecpar->extradata;
                      if (ed[0] == 1) has_hvcc = 1;
                  }
+                
+                // 🔧 Android 15修复：优先使用HVC1格式，更好的兼容性
                  if (has_hvcc) {
                      out_stream->codecpar->codec_tag = MKTAG('h','v','c','1');
-                     av_log(ffp, AV_LOG_INFO, "🎯 采用HVC1（检测到HVCC）\n");
+                    av_log(ffp, AV_LOG_INFO, "🎯 采用HVC1（检测到HVCC，Android 15兼容）\n");
                  } else {
-                     out_stream->codecpar->codec_tag = MKTAG('h','e','v','1');
-                     av_log(ffp, AV_LOG_INFO, "🎯 采用HEV1（无HVCC/Annex B）\n");
-                 }
-             }
+                    // 即使没有HVCC，也尝试使用HVC1以提高兼容性
+                    out_stream->codecpar->codec_tag = MKTAG('h','v','c','1');
+                    av_log(ffp, AV_LOG_INFO, "🎯 强制使用HVC1（Android 15兼容性优化）\n");
+                }
+            }
+            
+            // 🔧 关键修复：确保extradata正确复制，避免黑屏
+            if (in_stream->codecpar->extradata_size > 0 && in_stream->codecpar->extradata) {
+                // 释放旧的extradata
+                if (out_stream->codecpar->extradata) {
+                    av_freep(&out_stream->codecpar->extradata);
+                    out_stream->codecpar->extradata_size = 0;
+                }
+                
+                // 分配并复制新的extradata
+                out_stream->codecpar->extradata = av_mallocz(in_stream->codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (out_stream->codecpar->extradata) {
+                    memcpy(out_stream->codecpar->extradata, in_stream->codecpar->extradata, in_stream->codecpar->extradata_size);
+                    out_stream->codecpar->extradata_size = in_stream->codecpar->extradata_size;
+                    
+                    av_log(ffp, AV_LOG_INFO, "🔧 H265 extradata复制成功: %d字节\n", 
+                           out_stream->codecpar->extradata_size);
+                } else {
+                    av_log(ffp, AV_LOG_ERROR, "❌ H265 extradata分配失败\n");
+                }
+            } else {
+                av_log(ffp, AV_LOG_WARNING, "⚠️ H265输入流缺少extradata，可能影响播放兼容性\n");
+            }
              
-             if (out_stream->codecpar->format == AV_PIX_FMT_YUVJ420P) {
-                 out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
-                 av_log(ffp, AV_LOG_INFO, "🎯 像素格式从yuvj420p转换为yuv420p (兼容性)\n");
-             }
-             
-             out_stream->time_base = in_stream->time_base;
-             av_log(ffp, AV_LOG_INFO, "🎯 H265: 保持原始时间基准 %d/%d\n", 
-                    out_stream->time_base.num, out_stream->time_base.den);
+             // 🔧 H265时间基准修复：使用标准90kHz时间基准，确保兼容性
+             out_stream->time_base = (AVRational){1, 90000};
+             av_log(ffp, AV_LOG_INFO, "🎯 H265: 使用标准时间基准 1/90000（兼容性优化）\n");
              
              if (out_stream->codecpar->bit_rate == 0 && in_stream->codecpar->bit_rate > 0) {
                  out_stream->codecpar->bit_rate = in_stream->codecpar->bit_rate;
@@ -5447,13 +5537,13 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
              }
              
              av_log(ffp, AV_LOG_INFO, "H264兼容性设置完成: Profile=%d, Level=%d\n",
-                   out_stream->codecpar->profile, out_stream->codecpar->level);
-        }
-    }
-    
-    // 🔍 显示最终的流映射结果
+                    out_stream->codecpar->profile, out_stream->codecpar->level);
+         }
+     }
+     
+     // 🔍 显示最终的流映射结果
     av_log(ffp, AV_LOG_INFO, "📋 最终流映射表:\n");
-    for (int j = 0; j < is->ic->nb_streams; j++) {
+     for (int j = 0; j < is->ic->nb_streams; j++) {
          if (ffp->stream_mapping[j] >= 0) {
              AVStream *in_stream = is->ic->streams[j];
              av_log(ffp, AV_LOG_INFO, "  输入流%d -> 输出流%d (%s)", 
@@ -5508,19 +5598,19 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                      }
                  }
              }
-             if (is_hev1) {
-                 av_dict_set(&options, "brand", "mp41", 0);
-                 av_dict_set(&options, "compatible_brands", "isom,mp41,hev1", 0);
-                 av_dict_set(&options, "tag:v", "hev1", 0);
-                 av_dict_set(&options, "movflags", "+faststart+use_metadata_tags", 0);
-                 av_log(ffp, AV_LOG_INFO, "H265容器优化: 使用HEV1格式（Annex B兼容），确保手机播放兼容性\n");
-             } else {
-                 av_dict_set(&options, "brand", "mp41", 0);
-                 av_dict_set(&options, "compatible_brands", "isom,mp41,hvc1", 0);
+            // 🔧 Android 15兼容性优化：统一使用最兼容的设置
+            av_dict_set(&options, "brand", "mp42", 0);  // 使用MP4 v2品牌
+            av_dict_set(&options, "compatible_brands", "isom,mp41,mp42,hvc1", 0);  // 广泛兼容性
+            av_dict_set(&options, "movflags", "+faststart+use_metadata_tags+write_colr", 0);  // 包含色彩信息
+            
+            // 🔧 强制设置视频标签为HVC1（最佳Android兼容性）
                  av_dict_set(&options, "tag:v", "hvc1", 0);
-                 av_dict_set(&options, "movflags", "+faststart+use_metadata_tags+frag_keyframe", 0);
-                 av_log(ffp, AV_LOG_INFO, "H265容器优化: 使用HVC1格式（有hvcC元数据）\n");
-             }
+            
+            // 🔧 Android 15特殊设置：确保色彩信息正确写入
+            av_dict_set(&options, "write_colr", "1", 0);  // 写入色彩信息
+            av_dict_set(&options, "write_gama", "0", 0);  // 不写入gamma信息（避免冲突）
+            
+            av_log(ffp, AV_LOG_INFO, "🔧 H265 Android 15优化: MP42品牌 + HVC1标签 + 色彩信息\n");
          } else {
              av_dict_set(&options, "brand", "isom", 0);
          }
@@ -5530,15 +5620,15 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
      
     // 🔧 Android 15 兼容性修复：在写入头部之前调用修复函数
     fix_android15_recording_compatibility(ffp);
-    
-    // 写视频文件头
-    av_dict_set(&ffp->m_ofmt_ctx->metadata, "language", "eng", 0);
-    if (avformat_write_header(ffp->m_ofmt_ctx, &options) < 0) {
-        av_log(ffp, AV_LOG_ERROR, "写视频文件头失败：Error occurred when opening output file\n");
-        av_dict_free(&options);
-        goto end;
-    }
-    av_dict_free(&options);
+     
+     // 写视频文件头
+     av_dict_set(&ffp->m_ofmt_ctx->metadata, "language", "eng", 0);
+     if (avformat_write_header(ffp->m_ofmt_ctx, &options) < 0) {
+         av_log(ffp, AV_LOG_ERROR, "写视频文件头失败：Error occurred when opening output file\n");
+         av_dict_free(&options);
+         goto end;
+     }
+     av_dict_free(&options);
      
      ffp->is_record = 1;
      ffp->record_error = 0;
@@ -5791,16 +5881,22 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
         
         if (ffp->audio_frame_count > 0) {
             // 有音频：以音频为准，需要根据实际音频格式计算
-            // 检查第一个音频流的格式
+            // 🔧 安全检查：确保m_ofmt_ctx有效
             AVStream *audio_stream = NULL;
-            for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-                if (ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-                    audio_stream = ffp->m_ofmt_ctx->streams[i];
-                    break;
+            if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->streams && ffp->m_ofmt_ctx->nb_streams > 0) {
+                for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                    if (ffp->m_ofmt_ctx->streams[i] && 
+                        ffp->m_ofmt_ctx->streams[i]->codecpar &&
+                        ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                        audio_stream = ffp->m_ofmt_ctx->streams[i];
+                        break;
+                    }
                 }
+            } else {
+                av_log(ffp, AV_LOG_WARNING, "⚠️ m_ofmt_ctx无效，无法获取音频流信息\n");
             }
             
-            if (audio_stream && (audio_stream->codecpar->codec_id == AV_CODEC_ID_AAC)) {
+            if (audio_stream && audio_stream->codecpar && (audio_stream->codecpar->codec_id == AV_CODEC_ID_AAC)) {
                 // 检查是否是从PCMU/PCMA转换来的AAC
                 // 通过检查输入流来确定原始格式
                 int is_from_pcm = 0;
@@ -5833,16 +5929,75 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
                     // 原生AAC (使用原始采样率)
                     int sample_rate = audio_stream->codecpar->sample_rate;
                     if (sample_rate <= 0) sample_rate = 44100; // 默认值
-                    final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
-                    av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
-                           ffp->audio_frame_count, sample_rate, final_duration_sec);
+                    
+                    // 🔧 关键修复：对于低采样率音频，使用实际的时间戳来计算duration
+                    // 避免因采样率不匹配导致的duration计算错误
+                    if (sample_rate <= 16000) {
+                        // 低采样率音频（如8000Hz），使用视频时长作为参考
+                        if (ffp->video_frame_count > 0) {
+                            // 🔧 智能帧率检测：使用实际的视频流信息
+                            double fps = 25.0; // 默认帧率
+                            
+                            // 🔧 安全检查：确保m_ofmt_ctx有效
+                            if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->streams) {
+                                // 尝试从视频流获取实际帧率
+                                AVStream *video_stream = NULL;
+                                for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+                                    if (ffp->m_ofmt_ctx->streams[i] && 
+                                        ffp->m_ofmt_ctx->streams[i]->codecpar &&
+                                        ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                                        video_stream = ffp->m_ofmt_ctx->streams[i];
+                                        break;
+                                    }
+                                }
+                                
+                                if (video_stream && video_stream->avg_frame_rate.num > 0 && video_stream->avg_frame_rate.den > 0) {
+                                    fps = (double)video_stream->avg_frame_rate.num / (double)video_stream->avg_frame_rate.den;
+                                    av_log(ffp, AV_LOG_DEBUG, "🎯 检测到实际帧率: %.2f fps", fps);
+                                } else {
+                                    av_log(ffp, AV_LOG_DEBUG, "🎯 使用默认帧率: %.2f fps", fps);
+                                }
+                            } else {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ m_ofmt_ctx无效，使用默认帧率: %.2f fps", fps);
+                            }
+                            
+                            // 使用检测到的帧率计算时长
+                            double video_duration = (double)ffp->video_frame_count / fps;
+                            final_duration_sec = video_duration;
+                            av_log(ffp, AV_LOG_INFO, "🔧 低采样率AAC(%dHz)，使用视频时长: %d视频帧 ÷ %.2ffps = %.2f秒", 
+                                   sample_rate, ffp->video_frame_count, fps, final_duration_sec);
+                        } else {
+                            // 没有视频流，使用音频帧数但用更合理的计算方式
+                            final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
+                            av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
+                                   ffp->audio_frame_count, sample_rate, final_duration_sec);
+                        }
+                    } else {
+                        // 正常采样率音频
+                        final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
+                        av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
+                               ffp->audio_frame_count, sample_rate, final_duration_sec);
+                    }
                 }
-            } else {
+            } else if (audio_stream && audio_stream->codecpar) {
                 // 其他音频格式 (使用原始采样率)
                 int sample_rate = audio_stream->codecpar->sample_rate;
                 if (sample_rate <= 0) sample_rate = 44100; // 默认值
                 final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
                 av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于标准音频: %d帧 × 1024样本 ÷ %dHz = %.2f秒", ffp->audio_frame_count, sample_rate, final_duration_sec);
+            } else {
+                // 🔧 Fallback：无法获取音频流信息，使用简单估算
+                if (ffp->video_frame_count > 0) {
+                    // 有视频流，使用视频时长
+                    final_duration_sec = (double)ffp->video_frame_count / 25.0;
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 无法获取音频流信息，使用视频时长: %d帧 ÷ 25fps = %.2f秒", 
+                           ffp->video_frame_count, final_duration_sec);
+                } else {
+                    // 没有视频流，使用音频帧数和默认采样率估算
+                    final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 无法获取流信息，使用默认估算: %d音频帧 × 1024 ÷ 44100Hz = %.2f秒", 
+                           ffp->audio_frame_count, final_duration_sec);
+                }
             }
         } else if (ffp->video_frame_count > 0) {
             // 无音频：以视频为准
@@ -6181,6 +6336,79 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         return 0;
     }
     
+    // 🔧 H.265关键帧检测：确保从关键帧开始录制
+    AVStream *in_stream = is->ic->streams[in_stream_index];
+    if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && 
+        in_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+        
+        // 如果还在等待关键帧，检查当前包是否为关键帧
+        if (ffp->waiting_for_keyframe) {
+            // 🔧 修复：H.265流的关键帧检测可能不准确，尝试多种方式检测
+            int is_keyframe = 0;
+            
+            // 方法1：检查包标志
+            if (packet->flags & AV_PKT_FLAG_KEY) {
+                is_keyframe = 1;
+                av_log(ffp, AV_LOG_DEBUG, "🔍 H265: 通过包标志检测到关键帧\n");
+            }
+            
+            // 方法2：对于H.265，如果包标志不可靠，检查包大小（关键帧通常较大）
+            if (!is_keyframe && packet->size > 1000) {
+                // 检查是否包含NAL单元类型（简单启发式检测）
+                if (packet->data && packet->size > 4) {
+                    // H.265 NAL单元类型在第5个字节的高6位
+                    uint8_t nal_type = (packet->data[4] >> 1) & 0x3F;
+                    // IDR帧的NAL类型为19-20
+                    if (nal_type >= 19 && nal_type <= 20) {
+                        is_keyframe = 1;
+                        av_log(ffp, AV_LOG_DEBUG, "🔍 H265: 通过NAL类型检测到IDR帧 (type=%d)\n", nal_type);
+                    }
+                }
+            }
+            
+            // 方法3：如果前面的方法都失败，且已经等待了很久，强制开始录制
+            static int keyframe_wait_count = 0;
+            static int reset_flag = 0;
+            
+            // 🔧 重置静态变量（在新的录制开始时）
+            if (ffp->video_frame_count == 0 && ffp->audio_frame_count == 0 && reset_flag == 0) {
+                keyframe_wait_count = 0;
+                reset_flag = 1;
+                av_log(ffp, AV_LOG_DEBUG, "🔄 重置H265关键帧等待计数器\n");
+            }
+            
+            keyframe_wait_count++;
+            if (!is_keyframe && keyframe_wait_count > 50) { // 等待50个包后强制开始
+                is_keyframe = 1;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ H265: 等待关键帧超时，强制开始录制\n");
+                keyframe_wait_count = 0;
+            }
+            
+            if (!is_keyframe) {
+                av_log(ffp, AV_LOG_DEBUG, "🔍 H265: 等待关键帧，跳过非关键帧 PTS=%lld, flags=0x%x, size=%d\n", 
+                       packet->pts, packet->flags, packet->size);
+                return 0; // 跳过非关键帧
+            } else {
+                ffp->waiting_for_keyframe = 0; // 找到关键帧，开始录制
+                keyframe_wait_count = 0; // 重置计数器
+                av_log(ffp, AV_LOG_INFO, "🎯 H265: 找到关键帧，开始录制 PTS=%lld, flags=0x%x, size=%d\n", 
+                       packet->pts, packet->flags, packet->size);
+                
+                // 🔧 关键修复：确保第一个关键帧包含完整的参数集
+                AVStream *out_stream = ffp->m_ofmt_ctx->streams[out_stream_index];
+                if (out_stream->codecpar->extradata_size == 0 && in_stream->codecpar->extradata_size > 0) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ H265: 输出流缺少extradata，从输入流复制\n");
+                    out_stream->codecpar->extradata = av_mallocz(in_stream->codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (out_stream->codecpar->extradata) {
+                        memcpy(out_stream->codecpar->extradata, in_stream->codecpar->extradata, in_stream->codecpar->extradata_size);
+                        out_stream->codecpar->extradata_size = in_stream->codecpar->extradata_size;
+                        av_log(ffp, AV_LOG_INFO, "🔧 H265: extradata复制完成 %d字节\n", out_stream->codecpar->extradata_size);
+                    }
+                }
+            }
+        }
+    }
+    
     // 简化的包处理：直接写入，不做复杂的时间戳处理
     AVPacket pkt;
     av_init_packet(&pkt);
@@ -6188,15 +6416,78 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     
     pkt.stream_index = out_stream_index;
     
-    // 简单的时间戳转换
-    AVStream *in_stream = is->ic->streams[in_stream_index];
+    // 🔧 关键修复：安全的时间戳转换，避免AV_NOPTS_VALUE
+    // in_stream 已在上面定义，这里直接使用
     AVStream *out_stream = ffp->m_ofmt_ctx->streams[out_stream_index];
     
-    av_packet_rescale_ts(&pkt, in_stream->time_base, out_stream->time_base);
+    // 保存原始时间戳用于调试
+    int64_t orig_pts = pkt.pts;
+    int64_t orig_dts = pkt.dts;
+    
+    // 🔧 关键修复：MP4容器需要从时间戳0开始，使用相对时间戳
+    if (ffp->record_first_vpts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
+        // 记录第一个有效时间戳作为基准
+        ffp->record_first_vpts = pkt.pts;
+        av_log(ffp, AV_LOG_INFO, "🎯 设置录制时间基准: PTS=%lld (流%d)\n", 
+               ffp->record_first_vpts, in_stream_index);
+    }
+    
+    // 只有当时间戳有效时才进行转换
+    if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+        // 先转换为相对时间戳（从0开始）
+        int64_t relative_pts = pkt.pts - ffp->record_first_vpts;
+        if (relative_pts < 0) relative_pts = 0;
+        
+        // 再转换时间基准
+        pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
+                                   (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+    }
+    
+    if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+        // 先转换为相对时间戳（从0开始）
+        int64_t relative_dts = pkt.dts - ffp->record_first_vpts;
+        if (relative_dts < 0) relative_dts = 0;
+        
+        // 再转换时间基准
+        pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
+                                   (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+    }
+    
+    // 确保DTS <= PTS
+    if (pkt.dts != AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE && pkt.dts > pkt.pts) {
+        pkt.dts = pkt.pts;
+    }
+    
     pkt.pos = -1;
     
-    // 直接写入，不加锁（假设调用者已处理同步）
-    int ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, &pkt);
+    // 🔍 调试时间戳转换
+    av_log(ffp, AV_LOG_DEBUG, "🕐 时间戳转换: 原始PTS=%lld->%lld, DTS=%lld->%lld\n", 
+           orig_pts, pkt.pts, orig_dts, pkt.dts);
+    
+    // 🔍 保存写入前的时间戳用于调试
+    int64_t pts_before_write = pkt.pts;
+    int64_t dts_before_write = pkt.dts;
+    
+    // 🔧 关键修复：使用av_write_frame避免时间戳被重置
+    // av_interleaved_write_frame会重新排序和修改时间戳，导致PTS变为AV_NOPTS_VALUE
+    // 使用av_write_frame保持原始时间戳不变
+    int ret = av_write_frame(ffp->m_ofmt_ctx, &pkt);
+    
+    // 🔍 更新帧计数器用于调试
+    if (ret >= 0) {
+        if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            ffp->video_frame_count++;
+            av_log(ffp, AV_LOG_INFO, "✅ 录制视频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
+                   ffp->video_frame_count, pts_before_write, pkt.pts);
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            ffp->audio_frame_count++;
+            av_log(ffp, AV_LOG_INFO, "✅ 录制音频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
+                   ffp->audio_frame_count, pts_before_write, pkt.pts);
+        }
+    } else {
+        av_log(ffp, AV_LOG_ERROR, "❌ 录制失败: %s, PTS=%lld, DTS=%lld\n", 
+               av_err2str(ret), pts_before_write, dts_before_write);
+    }
     
     av_packet_unref(&pkt);
     return ret;
@@ -6219,6 +6510,10 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
         av_packet_free(&pkt_copy);
         return;
     }
+    
+    // 🔍 调试包复制后的时间戳
+    av_log(ffp, AV_LOG_DEBUG, "📦 包复制: 流%d, 原始PTS=%lld, 复制PTS=%lld\n", 
+           packet->stream_index, packet->pts, pkt_copy->pts);
     
     // TODO: 将包放入录制队列，由独立线程处理
     // 这里暂时调用原函数，但移除了复杂的处理逻辑
@@ -7213,20 +7508,45 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
  }
 // 🔧 修复Android 15播放速度问题和移动端兼容性的辅助函数
 static void fix_android15_recording_compatibility(FFPlayer *ffp) {
-    if (!ffp || !ffp->m_ofmt_ctx)
-        return;
-        
-    // 只处理MP4容器
-    if (strcmp(ffp->m_ofmt->name, "mp4") != 0)
-        return;
-        
+     if (!ffp || !ffp->m_ofmt_ctx)
+         return;
+         
+     // 只处理MP4容器
+     if (strcmp(ffp->m_ofmt->name, "mp4") != 0)
+         return;
+         
     av_log(ffp, AV_LOG_INFO, "🔧 应用Android 15兼容性修复和移动端优化");
-    
-    // 设置所有流的时间基准和帧率
-    for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-        AVStream *stream = ffp->m_ofmt_ctx->streams[i];
-        
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+     
+     // 设置所有流的时间基准和帧率
+     for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
+         AVStream *stream = ffp->m_ofmt_ctx->streams[i];
+         
+         if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // 🔧 H.265 Android 15特殊修复
+            if (stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                av_log(ffp, AV_LOG_INFO, "🎯 检测到H.265流，应用Android 15黑屏修复\n");
+                
+                // 强制设置兼容的色彩参数
+                stream->codecpar->color_range = AVCOL_RANGE_MPEG;  // TV范围
+                stream->codecpar->color_primaries = AVCOL_PRI_BT709;
+                stream->codecpar->color_trc = AVCOL_TRC_BT709;
+                stream->codecpar->color_space = AVCOL_SPC_BT709;
+                
+                // 确保Profile/Level兼容性
+                if (stream->codecpar->profile == FF_PROFILE_UNKNOWN || 
+                    stream->codecpar->profile > FF_PROFILE_HEVC_MAIN) {
+                    stream->codecpar->profile = FF_PROFILE_HEVC_MAIN;
+                }
+                
+                if (stream->codecpar->level == FF_LEVEL_UNKNOWN || 
+                    stream->codecpar->level > 120) {  // Level 4.0
+                    stream->codecpar->level = 120;
+                }
+                
+                av_log(ffp, AV_LOG_INFO, "🔧 H.265修复: Profile=%d, Level=%d, 色彩=BT709+MPEG\n",
+                       stream->codecpar->profile, stream->codecpar->level);
+            }
+            
             // 🎯 视频流优化：使用标准时间基准，避免绿屏问题
             stream->time_base = (AVRational){1, 90000};  // 90kHz标准时间基准
             
@@ -7277,8 +7597,8 @@ static void fix_android15_recording_compatibility(FFPlayer *ffp) {
         av_dict_set(&ffp->m_ofmt_ctx->metadata, "minor_version", "0", 0);
         
         av_log(ffp, AV_LOG_INFO, "📱 设置移动端兼容性标识\n");
-    }
-}
+     }
+ }
  //文件转码为h265.
  int ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path) {
      AVFormatContext *input_ctx = NULL;
