@@ -586,6 +586,7 @@ typedef struct FFPlayer {
     AVFormatContext *m_ofmt_ctx;        // 用于输出的AVFormatContext结构体
     AVOutputFormat *m_ofmt;
     pthread_mutex_t record_mutex;       // 锁
+    int record_mutex_initialized;       // 互斥锁是否已初始化
     int is_record;                      // 是否在录制
     int record_error;
 
@@ -871,6 +872,92 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->playable_duration_ms           = 0;
 
     ffp->packet_buffering               = 1;
+
+    // 🔧 关键修复：重置录播相关状态，防止影响下次播放
+    ffp->record_mutex_initialized       = 0;
+    ffp->is_record                      = 0;
+    ffp->record_error                   = 0;
+    ffp->is_first                       = 0;
+    ffp->start_pts                      = AV_NOPTS_VALUE;
+    ffp->start_dts                      = AV_NOPTS_VALUE;
+    ffp->last_record_dts                = AV_NOPTS_VALUE;
+    ffp->last_record_pts                = AV_NOPTS_VALUE;
+    ffp->prev_video_pts                 = AV_NOPTS_VALUE;
+    ffp->prev_audio_pts                 = AV_NOPTS_VALUE;
+    ffp->avg_video_duration             = 0;
+    ffp->avg_audio_duration             = 0;
+    ffp->video_frame_count              = 0;
+    ffp->audio_frame_count              = 0;
+    ffp->last_v_pts_for_rec             = AV_NOPTS_VALUE;
+    ffp->last_a_pts_for_rec             = AV_NOPTS_VALUE;
+    ffp->waiting_for_keyframe           = 0;
+    ffp->record_first_vpts              = AV_NOPTS_VALUE;
+    ffp->record_next_audio_pts          = 0;
+    ffp->need_transcode                 = 0;
+    ffp->enable_pcm_to_aac_transcode    = 0;
+    ffp->min_record_time                = 0;
+    ffp->record_start_time              = 0;
+    ffp->record_real_time               = 0;
+    ffp->video_only                     = 0;
+    ffp->direct_hevc_write              = 0;
+    ffp->direct_video_copy              = 0;
+    ffp->last_video_dts                 = AV_NOPTS_VALUE;
+    ffp->last_audio_dts                 = AV_NOPTS_VALUE;
+    ffp->has_hevc_video                 = 0;
+    ffp->nb_output_streams              = 0;
+    
+    // 清理录播相关的指针和资源
+    if (ffp->m_ofmt_ctx) {
+        avformat_free_context(ffp->m_ofmt_ctx);
+        ffp->m_ofmt_ctx = NULL;
+    }
+    ffp->m_ofmt = NULL;
+    
+    if (ffp->audio_dec_ctx_record) {
+        avcodec_free_context(&ffp->audio_dec_ctx_record);
+        ffp->audio_dec_ctx_record = NULL;
+    }
+    if (ffp->video_enc_ctx) {
+        avcodec_free_context(&ffp->video_enc_ctx);
+        ffp->video_enc_ctx = NULL;
+    }
+    if (ffp->audio_enc_ctx) {
+        avcodec_free_context(&ffp->audio_enc_ctx);
+        ffp->audio_enc_ctx = NULL;
+    }
+    if (ffp->tmp_frame) {
+        av_frame_free(&ffp->tmp_frame);
+        ffp->tmp_frame = NULL;
+    }
+    if (ffp->sws_ctx) {
+        sws_freeContext(ffp->sws_ctx);
+        ffp->sws_ctx = NULL;
+    }
+    if (ffp->swr_ctx_record) {
+        swr_free(&ffp->swr_ctx_record);
+        ffp->swr_ctx_record = NULL;
+    }
+    if (ffp->record_audio_fifo) {
+        av_audio_fifo_free(ffp->record_audio_fifo);
+        ffp->record_audio_fifo = NULL;
+    }
+    if (ffp->stream_mapping) {
+        av_free(ffp->stream_mapping);
+        ffp->stream_mapping = NULL;
+    }
+    av_freep(&ffp->record_output_file);
+    av_freep(&ffp->temp_record_file);
+    
+    // 清理录播音频队列（如果已初始化）
+    if (ffp->record_audio_queue.mutex) {
+        packet_queue_destroy(&ffp->record_audio_queue);
+    }
+    
+    // 销毁录播互斥锁（如果已初始化）
+    if (ffp->record_mutex_initialized) {
+        pthread_mutex_destroy(&ffp->record_mutex);
+        ffp->record_mutex_initialized = 0;
+    }
     ffp->pictq_size                     = VIDEO_PICTURE_QUEUE_SIZE_DEFAULT; // option
     ffp->max_fps                        = 31; // option
 
