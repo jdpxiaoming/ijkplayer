@@ -5876,133 +5876,25 @@ static void ffp_reset_record_static_state(void);
         av_log(ffp, AV_LOG_INFO, "📊 录制统计 - 视频帧: %d, 音频帧: %d", 
                ffp->video_frame_count, ffp->audio_frame_count);
         
-        // 🎯 最终修复：基于实际录制情况设置duration
+        // 🎯 简化修复：直接使用备用方案的duration（已经是正确的）
         double final_duration_sec = 0;
         
-        if (ffp->audio_frame_count > 0) {
-            // 有音频：以音频为准，需要根据实际音频格式计算
-            // 🔧 安全检查：确保m_ofmt_ctx有效
-            AVStream *audio_stream = NULL;
-            if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->streams && ffp->m_ofmt_ctx->nb_streams > 0) {
-                for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-                    if (ffp->m_ofmt_ctx->streams[i] && 
-                        ffp->m_ofmt_ctx->streams[i]->codecpar &&
-                        ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-                        audio_stream = ffp->m_ofmt_ctx->streams[i];
-                        break;
-                    }
-                }
-            } else {
-                av_log(ffp, AV_LOG_WARNING, "⚠️ m_ofmt_ctx无效，无法获取音频流信息\n");
+        // 🔧 从容器duration获取已经计算好的正确时长
+        if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->duration > 0) {
+            final_duration_sec = (double)ffp->m_ofmt_ctx->duration / AV_TIME_BASE;
+            av_log(ffp, AV_LOG_INFO, "✅ 使用备用方案duration: %.2f秒 (视频:%d帧, 音频:%d帧)", 
+                   final_duration_sec, ffp->video_frame_count, ffp->audio_frame_count);
+        } else {
+            // 如果容器duration无效，使用简单的视频帧数估算
+            if (ffp->video_frame_count > 0) {
+                final_duration_sec = (double)ffp->video_frame_count / 25.0;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ 容器duration无效，使用视频帧估算: %d帧 ÷ 25fps = %.2f秒", 
+                       ffp->video_frame_count, final_duration_sec);
+            } else if (ffp->audio_frame_count > 0) {
+                final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ 容器duration无效，使用音频帧估算: %d帧 × 1024 ÷ 44100Hz = %.2f秒", 
+                       ffp->audio_frame_count, final_duration_sec);
             }
-            
-            if (audio_stream && audio_stream->codecpar && (audio_stream->codecpar->codec_id == AV_CODEC_ID_AAC)) {
-                // 检查是否是从PCMU/PCMA转换来的AAC
-                // 通过检查输入流来确定原始格式
-                int is_from_pcm = 0;
-                VideoState *is = ffp->is; // 声明is变量
-                if (is && is->ic && ffp->stream_mapping) {
-                    // 找到对应的输入流索引
-                    int input_stream_index = -1;
-                    for (int j = 0; j < is->ic->nb_streams; j++) {
-                        if (ffp->stream_mapping[j] >= 0 && 
-                            ffp->stream_mapping[j] == (audio_stream - ffp->m_ofmt_ctx->streams[0])) {
-                            input_stream_index = j;
-                            break;
-                        }
-                    }
-                    
-                    // 检查输入流是否为PCMU/PCMA
-                    if (input_stream_index >= 0 && 
-                        (is->ic->streams[input_stream_index]->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW ||
-                         is->ic->streams[input_stream_index]->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
-                        is_from_pcm = 1;
-                    }
-                }
-                
-                if (is_from_pcm) {
-                    // 从PCMU/PCMA转换的AAC (兼容性44.1kHz)
-                    final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
-                    av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于PCMU/PCMA->AAC(兼容性): %d帧 × 1024样本 ÷ 44100Hz = %.2f秒", 
-                           ffp->audio_frame_count, final_duration_sec);
-                } else {
-                    // 原生AAC (使用原始采样率)
-                    int sample_rate = audio_stream->codecpar->sample_rate;
-                    if (sample_rate <= 0) sample_rate = 44100; // 默认值
-                    
-                    // 🔧 关键修复：对于低采样率音频，使用实际的时间戳来计算duration
-                    // 避免因采样率不匹配导致的duration计算错误
-                    if (sample_rate <= 16000) {
-                        // 低采样率音频（如8000Hz），使用视频时长作为参考
-                        if (ffp->video_frame_count > 0) {
-                            // 🔧 智能帧率检测：使用实际的视频流信息
-                            double fps = 25.0; // 默认帧率
-                            
-                            // 🔧 安全检查：确保m_ofmt_ctx有效
-                            if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->streams) {
-                                // 尝试从视频流获取实际帧率
-                                AVStream *video_stream = NULL;
-                                for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
-                                    if (ffp->m_ofmt_ctx->streams[i] && 
-                                        ffp->m_ofmt_ctx->streams[i]->codecpar &&
-                                        ffp->m_ofmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                                        video_stream = ffp->m_ofmt_ctx->streams[i];
-                                        break;
-                                    }
-                                }
-                                
-                                if (video_stream && video_stream->avg_frame_rate.num > 0 && video_stream->avg_frame_rate.den > 0) {
-                                    fps = (double)video_stream->avg_frame_rate.num / (double)video_stream->avg_frame_rate.den;
-                                    av_log(ffp, AV_LOG_DEBUG, "🎯 检测到实际帧率: %.2f fps", fps);
-                                } else {
-                                    av_log(ffp, AV_LOG_DEBUG, "🎯 使用默认帧率: %.2f fps", fps);
-                                }
-                            } else {
-                                av_log(ffp, AV_LOG_WARNING, "⚠️ m_ofmt_ctx无效，使用默认帧率: %.2f fps", fps);
-                            }
-                            
-                            // 使用检测到的帧率计算时长
-                            double video_duration = (double)ffp->video_frame_count / fps;
-                            final_duration_sec = video_duration;
-                            av_log(ffp, AV_LOG_INFO, "🔧 低采样率AAC(%dHz)，使用视频时长: %d视频帧 ÷ %.2ffps = %.2f秒", 
-                                   sample_rate, ffp->video_frame_count, fps, final_duration_sec);
-                        } else {
-                            // 没有视频流，使用音频帧数但用更合理的计算方式
-                            final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
-                            av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
-                                   ffp->audio_frame_count, sample_rate, final_duration_sec);
-                        }
-                    } else {
-                        // 正常采样率音频
-                        final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
-                        av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于原生AAC: %d帧 × 1024样本 ÷ %dHz = %.2f秒", 
-                               ffp->audio_frame_count, sample_rate, final_duration_sec);
-                    }
-                }
-            } else if (audio_stream && audio_stream->codecpar) {
-                // 其他音频格式 (使用原始采样率)
-                int sample_rate = audio_stream->codecpar->sample_rate;
-                if (sample_rate <= 0) sample_rate = 44100; // 默认值
-                final_duration_sec = (double)(ffp->audio_frame_count * 1024) / (double)sample_rate;
-                av_log(ffp, AV_LOG_INFO, "🎵 最终duration基于标准音频: %d帧 × 1024样本 ÷ %dHz = %.2f秒", ffp->audio_frame_count, sample_rate, final_duration_sec);
-            } else {
-                // 🔧 Fallback：无法获取音频流信息，使用简单估算
-                if (ffp->video_frame_count > 0) {
-                    // 有视频流，使用视频时长
-                    final_duration_sec = (double)ffp->video_frame_count / 25.0;
-                    av_log(ffp, AV_LOG_WARNING, "⚠️ 无法获取音频流信息，使用视频时长: %d帧 ÷ 25fps = %.2f秒", 
-                           ffp->video_frame_count, final_duration_sec);
-                } else {
-                    // 没有视频流，使用音频帧数和默认采样率估算
-                    final_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
-                    av_log(ffp, AV_LOG_WARNING, "⚠️ 无法获取流信息，使用默认估算: %d音频帧 × 1024 ÷ 44100Hz = %.2f秒", 
-                           ffp->audio_frame_count, final_duration_sec);
-                }
-            }
-        } else if (ffp->video_frame_count > 0) {
-            // 无音频：以视频为准
-            final_duration_sec = (double)ffp->video_frame_count / 25.0;
-            av_log(ffp, AV_LOG_INFO, "🎬 最终duration基于视频: %d帧 = %.2f秒", ffp->video_frame_count, final_duration_sec);
         }
         
         if (final_duration_sec > 0) {
@@ -6123,13 +6015,14 @@ static void ffp_reset_record_static_state(void);
     
     av_log(ffp, AV_LOG_INFO, "✅ 录制停止完成\n");
     
-    // H265后处理：启动兼容性重编码
+    // H265后处理：暂时禁用重编码，避免播放中断
     if (has_hevc_stream && recorded_file_path) {
-        av_log(ffp, AV_LOG_INFO, "🔄 开始H265兼容性重编码: %s\n", recorded_file_path);
-        int reencoding_ret = ffp_start_h265_reencoding(ffp, recorded_file_path);
-        if (reencoding_ret != 0) {
-            av_log(ffp, AV_LOG_ERROR, "❌ 启动H265重编码失败: %d\n", reencoding_ret);
-        }
+        av_log(ffp, AV_LOG_INFO, "🔄 检测到H265视频流，但暂时跳过重编码以避免播放中断: %s\n", recorded_file_path);
+        // 🔧 临时禁用重编码，因为会导致播放中断
+        // int reencoding_ret = ffp_start_h265_reencoding(ffp, recorded_file_path);
+        // if (reencoding_ret != 0) {
+        //     av_log(ffp, AV_LOG_ERROR, "❌ 启动H265重编码失败: %d\n", reencoding_ret);
+        // }
     }
     
     // 清理内存
