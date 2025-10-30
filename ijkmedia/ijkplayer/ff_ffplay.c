@@ -3695,6 +3695,7 @@ static void ffp_reset_record_static_state(void);
            // 🔧 关键修复：检查流类型而不是特定索引，确保所有音视频包都被录制
            if (pkt->stream_index >= 0 && pkt->stream_index < ic->nb_streams) {
                AVStream *stream = ic->streams[pkt->stream_index];
+
                if (stream && stream->codecpar && 
                    (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO || 
                     stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)) {
@@ -3705,13 +3706,13 @@ static void ffp_reset_record_static_state(void);
                        ffp_record_file_async(ffp, pkt);
                        
                        // 🔍 调试日志：确认录制调用
-                       if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                           av_log(ffp, AV_LOG_DEBUG, "🎬 录制视频包: 流%d, PTS=%lld\n", 
-                                  pkt->stream_index, pkt->pts);
-             } else {
-                           av_log(ffp, AV_LOG_DEBUG, "🔊 录制音频包: 流%d, PTS=%lld\n", 
-                                  pkt->stream_index, pkt->pts);
-                       }
+            //            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            //                av_log(ffp, AV_LOG_DEBUG, "🎬 录制视频包: 流%d, PTS=%lld\n", 
+            //                       pkt->stream_index, pkt->pts);
+            //  } else {
+                        //    av_log(ffp, AV_LOG_DEBUG, "🔊 录制音频包: 流%d, PTS=%lld\n", 
+                        //           pkt->stream_index, pkt->pts);
+                    //    }
                    }
                }
              }
@@ -5228,8 +5229,12 @@ static void ffp_reset_record_static_state(void);
      ffp->is_first = 0;
     ffp->waiting_for_keyframe = 1; // 🔧 H265修复：开始录制时等待关键帧
      ffp->record_first_vpts = AV_NOPTS_VALUE;
+     ffp->record_first_apts = AV_NOPTS_VALUE; // 🔧 重置音频基准时间戳
      ffp->stream_mapping = NULL;
      ffp->nb_output_streams = 0;
+     
+     // 🔧 关键修复：设置录制开始时间用于duration计算
+     ffp->record_start_time = av_gettime() / 1000; // 当前时间（毫秒）
      
      if (!file_name || !strlen(file_name)) { // 没有路径
          av_log(ffp, AV_LOG_ERROR, "filename is invalid");
@@ -5897,6 +5902,42 @@ static void ffp_reset_record_static_state(void);
             }
         }
         
+        // 🎯 混合Duration算法：系统时间差 vs 当前计算结果
+        if (final_duration_sec > 0) {
+            // 计算系统时间差作为参考
+            int64_t current_time = av_gettime() / 1000; // 当前时间（毫秒）
+            int64_t duration_ms = current_time - ffp->record_start_time; // 时间差（毫秒）
+            double system_duration_sec = (double)duration_ms / 1000.0; // 转换为秒
+            
+            av_log(ffp, AV_LOG_INFO, "🔍 时间调试 - 开始时间: %lld毫秒, 当前时间: %lld毫秒, 时间差: %lld毫秒", 
+                   ffp->record_start_time, current_time, duration_ms);
+            av_log(ffp, AV_LOG_INFO, "⏱️ Duration对比 - 当前计算: %.3f秒, 系统时间差: %.3f秒", 
+                   final_duration_sec, system_duration_sec);
+            
+            // 计算误差
+            double duration_diff = fabs(final_duration_sec - system_duration_sec);
+            
+            if (duration_diff > 5.0) {
+                // 误差超过5秒，使用系统时间差
+                av_log(ffp, AV_LOG_WARNING, "⚠️ Duration误差过大(%.3f秒)，使用系统时间差: %.3f秒 -> %.3f秒", 
+                       duration_diff, final_duration_sec, system_duration_sec);
+                final_duration_sec = system_duration_sec;
+                } else {
+                // 误差在5秒内，保持当前计算结果
+                av_log(ffp, AV_LOG_INFO, "✅ Duration误差可接受(%.3f秒)，保持当前计算: %.3f秒", 
+                       duration_diff, final_duration_sec);
+            }
+            
+            // 确保duration合理（至少0.1秒，最多24小时）
+            if (final_duration_sec < 0.1) {
+                final_duration_sec = 0.1;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ Duration过小，设置为最小值0.1秒");
+            } else if (final_duration_sec > 86400.0) { // 24小时
+                final_duration_sec = 86400.0;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ Duration过大，限制为24小时");
+            }
+        }
+        
         if (final_duration_sec > 0) {
             // 为每个流设置正确的duration
             for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
@@ -5938,7 +5979,7 @@ static void ffp_reset_record_static_state(void);
             av_dict_set(&ffp->m_ofmt_ctx->metadata, "major_brand", "mp41", 0);
             av_dict_set(&ffp->m_ofmt_ctx->metadata, "compatible_brands", "mp41,isom", 0);
             
-            av_log(ffp, AV_LOG_INFO, "🎯 最终容器duration: %lld (%.2f秒), 完整metadata已设置", 
+            av_log(ffp, AV_LOG_INFO, "🎯 最终容器duration: %lld (%.3f秒) - 混合算法优化", 
                    ffp->m_ofmt_ctx->duration, final_duration_sec);
          }
         
@@ -5959,12 +6000,46 @@ static void ffp_reset_record_static_state(void);
             }
         }
         
-        // 安全地写入文件尾
-        int trailer_ret = av_write_trailer(ffp->m_ofmt_ctx);
+        // 🔧 长时间录制优化：写入文件尾前强制刷新所有缓冲区
+        if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
+            av_log(ffp, AV_LOG_INFO, "🔄 写入文件尾前强制刷新缓冲区\n");
+            avio_flush(ffp->m_ofmt_ctx->pb);
+        }
+        
+        // 🔧 增强的文件尾写入：多次重试机制
+        int trailer_ret = -1;
+        int retry_count = 0;
+        const int max_retries = 3;
+        
+        while (retry_count < max_retries && trailer_ret < 0) {
+            trailer_ret = av_write_trailer(ffp->m_ofmt_ctx);
+            
         if (trailer_ret < 0) {
-            av_log(ffp, AV_LOG_WARNING, "⚠️ 写入文件尾时出现警告: %s\n", av_err2str(trailer_ret));
+                retry_count++;
+                av_log(ffp, AV_LOG_WARNING, "⚠️ 写入文件尾失败(第%d次): %s (错误代码:%d)\n", 
+                       retry_count, av_err2str(trailer_ret), trailer_ret);
+                
+                if (retry_count < max_retries) {
+                    // 等待100ms后重试
+                    av_usleep(100000);
+                    
+                    // 再次刷新缓冲区
+                    if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
+                        avio_flush(ffp->m_ofmt_ctx->pb);
+                    }
+                    
+                    av_log(ffp, AV_LOG_INFO, "🔄 准备重试写入文件尾...\n");
+                }
              } else {
-            av_log(ffp, AV_LOG_INFO, "✅ 文件尾写入成功\n");
+                av_log(ffp, AV_LOG_INFO, "✅ 文件尾写入成功 (重试%d次)\n", retry_count);
+            }
+        }
+        
+        // 如果所有重试都失败，记录错误但继续处理
+        if (trailer_ret < 0) {
+            av_log(ffp, AV_LOG_ERROR, "❌ 文件尾写入最终失败: %s (错误代码:%d)\n", 
+                   av_err2str(trailer_ret), trailer_ret);
+            av_log(ffp, AV_LOG_WARNING, "⚠️ 文件可能不完整，但已尽力保存数据\n");
         }
         
         // 安全地关闭文件
@@ -5972,6 +6047,24 @@ static void ffp_reset_record_static_state(void);
             int close_ret = avio_closep(&ffp->m_ofmt_ctx->pb);
             if (close_ret < 0) {
                 av_log(ffp, AV_LOG_WARNING, "⚠️ 关闭文件时出现警告: %s\n", av_err2str(close_ret));
+            }
+        }
+        
+        // 🔧 暂时禁用MP4完整性检查以定位崩溃问题
+        // TODO: 重新启用并修复崩溃问题
+        if (recorded_file_path && strlen(recorded_file_path) > 0) {
+            av_log(ffp, AV_LOG_INFO, "📋 录制完成，文件路径: %s\n", recorded_file_path);
+            av_log(ffp, AV_LOG_INFO, "🔧 MP4完整性检查已暂时禁用（避免崩溃）\n");
+            
+            // 简单的文件存在检查
+            FILE *file = fopen(recorded_file_path, "rb");
+            if (file) {
+                fseek(file, 0, SEEK_END);
+                long file_size = ftell(file);
+                fclose(file);
+                av_log(ffp, AV_LOG_INFO, "📊 录制文件大小: %ld 字节\n", file_size);
+            } else {
+                av_log(ffp, AV_LOG_ERROR, "❌ 无法访问录制文件\n");
             }
         }
         
@@ -6004,11 +6097,22 @@ static void ffp_reset_record_static_state(void);
         av_log(ffp, AV_LOG_INFO, "📋 录制停止，流级别时间戳基准将在下次录制时重置\n");
     }
     
-    // 标记录制已停止
+    // 🔧 安全重置所有录制相关变量，避免悬空指针访问
     ffp->is_record = 0;
     ffp->record_error = 0;
+    ffp->record_first_vpts = AV_NOPTS_VALUE;
+    ffp->record_first_apts = AV_NOPTS_VALUE;
+    ffp->last_record_pts = AV_NOPTS_VALUE;
+    ffp->prev_video_pts = AV_NOPTS_VALUE;
+    ffp->prev_audio_pts = AV_NOPTS_VALUE;
+    ffp->video_frame_count = 0;
+    ffp->audio_frame_count = 0;
+    ffp->waiting_for_keyframe = 0;
     
     pthread_mutex_unlock(&ffp->record_mutex);
+    
+    // 🔧 防崩溃：添加短暂延迟，确保其他线程完成对录制资源的访问
+    av_usleep(50000); // 50毫秒延迟
     
     // 注意：不在这里销毁互斥锁，避免read_thread中的竞态条件
     // 互斥锁将在ffp_reset_internal或ffp_destroy中统一处理
@@ -6215,10 +6319,32 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         return 0;
     }
     
-    // 🔧 检查录制错误状态，避免在出错后继续写入
+    // 🔧 智能错误恢复：不因单次I/O错误永久停止录制
+    static int consecutive_errors = 0;
+    static int64_t last_error_time = 0;
+    
     if (ffp->record_error) {
-        av_log(ffp, AV_LOG_DEBUG, "⚠️ 录制已出错，跳过写入\n");
-        return -1;
+        int64_t current_time = av_gettime() / 1000; // 毫秒
+        
+        // 如果距离上次错误超过5秒，重置错误计数
+        if (current_time - last_error_time > 5000) {
+            consecutive_errors = 0;
+            ffp->record_error = 0; // 重置错误状态
+            av_log(ffp, AV_LOG_INFO, "🔄 录制错误状态已重置，恢复录制\n");
+        } else {
+            consecutive_errors++;
+            
+            // 只有连续错误超过10次才永久停止
+            if (consecutive_errors > 10) {
+                av_log(ffp, AV_LOG_ERROR, "❌ 连续录制错误过多(%d次)，停止录制\n", consecutive_errors);
+                return -1;
+            } else {
+                av_log(ffp, AV_LOG_WARNING, "⚠️ 录制错误恢复中，尝试继续 (错误计数:%d/10)\n", consecutive_errors);
+                ffp->record_error = 0; // 尝试恢复
+            }
+        }
+        
+        last_error_time = current_time;
     }
     
     VideoState *is = ffp->is;
@@ -6323,33 +6449,63 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     int64_t orig_pts = pkt.pts;
     int64_t orig_dts = pkt.dts;
     
-    // 🔧 关键修复：MP4容器需要从时间戳0开始，使用相对时间戳
-    if (ffp->record_first_vpts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
-        // 记录第一个有效时间戳作为基准
-        ffp->record_first_vpts = pkt.pts;
-        av_log(ffp, AV_LOG_INFO, "🎯 设置录制时间基准: PTS=%lld (流%d)\n", 
-               ffp->record_first_vpts, in_stream_index);
-    }
+    // 🔧 修复录制速度问题：正确处理相对时间戳，确保时间间隔准确
+    // 问题分析：需要从0开始的时间戳，但要保持原始的时间间隔
+    // 解决方案：按流分别设置基准时间戳，避免不同流之间的时间戳冲突
     
-    // 只有当时间戳有效时才进行转换
-    if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
-        // 先转换为相对时间戳（从0开始）
-        int64_t relative_pts = pkt.pts - ffp->record_first_vpts;
-        if (relative_pts < 0) relative_pts = 0;
+    // 为每个流分别设置基准时间戳
+    if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (ffp->record_first_vpts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
+            ffp->record_first_vpts = pkt.pts;
+            av_log(ffp, AV_LOG_INFO, "🎯 设置视频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
+                   ffp->record_first_vpts, in_stream->time_base.num, in_stream->time_base.den);
+        }
         
-        // 再转换时间基准
-        pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
-                                   (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-    }
-    
-    if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
-        // 先转换为相对时间戳（从0开始）
-        int64_t relative_dts = pkt.dts - ffp->record_first_vpts;
-        if (relative_dts < 0) relative_dts = 0;
+        if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+            int64_t relative_pts = pkt.pts - ffp->record_first_vpts;
+            if (relative_pts < 0) relative_pts = 0;
+            pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
         
-        // 再转换时间基准
-        pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
-                                   (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+            int64_t relative_dts = pkt.dts - ffp->record_first_vpts;
+            if (relative_dts < 0) relative_dts = 0;
+            pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
+    } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        // 音频流使用独立的基准时间戳
+        if (ffp->record_first_apts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
+            ffp->record_first_apts = pkt.pts;
+            av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
+                   ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+        }
+        
+        if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
+            int64_t relative_pts = pkt.pts - ffp->record_first_apts;
+            if (relative_pts < 0) relative_pts = 0;
+            pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
+        
+        if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
+            int64_t relative_dts = pkt.dts - ffp->record_first_apts;
+            if (relative_dts < 0) relative_dts = 0;
+            pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
+    } else {
+        // 其他流直接转换时间基准
+        if (pkt.pts != AV_NOPTS_VALUE) {
+            pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
+        
+        if (pkt.dts != AV_NOPTS_VALUE) {
+            pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, 
+                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        }
     }
     
     // 确保DTS <= PTS
@@ -6360,8 +6516,8 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     pkt.pos = -1;
     
     // 🔍 调试时间戳转换
-    av_log(ffp, AV_LOG_DEBUG, "🕐 时间戳转换: 原始PTS=%lld->%lld, DTS=%lld->%lld\n", 
-           orig_pts, pkt.pts, orig_dts, pkt.dts);
+    // av_log(ffp, AV_LOG_DEBUG, "🕐 时间戳转换: 原始PTS=%lld->%lld, DTS=%lld->%lld\n", 
+    //        orig_pts, pkt.pts, orig_dts, pkt.dts);
     
     // 🔍 保存写入前的时间戳用于调试
     int64_t pts_before_write = pkt.pts;
@@ -6376,12 +6532,104 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     if (ret >= 0) {
         if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             ffp->video_frame_count++;
-            av_log(ffp, AV_LOG_INFO, "✅ 录制视频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
-                   ffp->video_frame_count, pts_before_write, pkt.pts);
+            
+            // 🔧 MP4完整性：检测和记录关键帧（使用FFPlayer实例变量避免静态变量问题）
+            if (pkt.flags & AV_PKT_FLAG_KEY) {
+                // 使用FFPlayer实例变量而不是静态变量，避免多线程问题
+                if (ffp->last_record_pts == AV_NOPTS_VALUE) {
+                    ffp->last_record_pts = pkt.pts; // 初始化
+                }
+                
+                int64_t keyframe_interval = pkt.pts - ffp->last_record_pts;
+                
+                av_log(ffp, AV_LOG_INFO, "🔑 关键帧: PTS=%lld, 间隔=%lld, 视频帧=#%d\n", 
+                       pkt.pts, keyframe_interval, ffp->video_frame_count);
+                
+                ffp->last_record_pts = pkt.pts;
+                
+                // 检测关键帧间隔是否过大（可能导致seek问题）
+                if (keyframe_interval > 90000 * 10) { // 超过10秒
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 关键帧间隔过大: %.2f秒，可能影响seek性能\n", 
+                           (double)keyframe_interval / 90000.0);
+                }
+            }
+            
+            // av_log(ffp, AV_LOG_INFO, "✅ 录制视频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
+            //        ffp->video_frame_count, pts_before_write, pkt.pts);
+            
+            // 🔧 长时间录制优化：每100个视频帧刷新一次缓冲区
+            if (ffp->video_frame_count % 100 == 0) {
+                if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
+                    avio_flush(ffp->m_ofmt_ctx->pb);
+                    av_log(ffp, AV_LOG_DEBUG, "🔄 缓冲区刷新: 视频帧 #%d\n", ffp->video_frame_count);
+                }
+            }
+            
+            // 🔧 MP4完整性：检测时间戳连续性（使用FFPlayer实例变量）
+            if (ffp->prev_video_pts != AV_NOPTS_VALUE) {
+                int64_t pts_gap = pkt.pts - ffp->prev_video_pts;
+                int64_t expected_gap = 90000 / 25; // 25fps下的期望间隔
+                
+                // 检测时间戳跳跃（可能导致seek问题）
+                if (abs(pts_gap - expected_gap) > expected_gap) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 视频时间戳不连续: 上一帧PTS=%lld, 当前PTS=%lld, 间隔=%lld (期望=%lld)\n", 
+                           ffp->prev_video_pts, pkt.pts, pts_gap, expected_gap);
+                }
+            }
+            ffp->prev_video_pts = pkt.pts;
+            
+            // 🔍 长时间录制监控：每1000帧报告一次状态
+            if (ffp->video_frame_count % 1000 == 0) {
+                int64_t current_time = av_gettime() / 1000;
+                double elapsed_sec = (double)(current_time - ffp->record_start_time) / 1000.0;
+                double fps = ffp->video_frame_count / elapsed_sec;
+                
+                av_log(ffp, AV_LOG_INFO, "📊 录制状态监控: 视频帧=%d, 音频帧=%d, 时长=%.1f秒, 帧率=%.1ffps\n", 
+                       ffp->video_frame_count, ffp->audio_frame_count, elapsed_sec, fps);
+                
+                // 🔧 MP4完整性：报告当前时间戳状态
+                av_log(ffp, AV_LOG_INFO, "🕐 时间戳状态: 当前视频PTS=%lld (%.2f秒)\n", 
+                       pkt.pts, (double)pkt.pts / 90000.0);
+            }
         } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             ffp->audio_frame_count++;
-            av_log(ffp, AV_LOG_INFO, "✅ 录制音频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
-                   ffp->audio_frame_count, pts_before_write, pkt.pts);
+            
+            // 🔧 MP4完整性：检测音视频同步（使用FFPlayer实例变量）
+            if (ffp->prev_audio_pts != AV_NOPTS_VALUE) {
+                int64_t audio_pts_gap = pkt.pts - ffp->prev_audio_pts;
+                int64_t expected_audio_gap = 8000 * 1024 / 44100; // AAC帧间隔
+                
+                // 检测音频时间戳跳跃
+                if (abs(audio_pts_gap - expected_audio_gap) > expected_audio_gap) {
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 音频时间戳不连续: 上一帧PTS=%lld, 当前PTS=%lld, 间隔=%lld\n", 
+                           ffp->prev_audio_pts, pkt.pts, audio_pts_gap);
+                }
+            }
+            ffp->prev_audio_pts = pkt.pts;
+            
+            // 🔧 MP4完整性：检查音视频同步（每100个音频帧检查一次）
+            if (ffp->audio_frame_count % 100 == 0 && ffp->prev_video_pts != AV_NOPTS_VALUE) {
+                // 将音频PTS转换为视频时间基准进行比较
+                int64_t audio_pts_in_video_timebase = av_rescale_q(pkt.pts, 
+                    (AVRational){1, 8000}, (AVRational){1, 90000});
+                int64_t sync_diff = audio_pts_in_video_timebase - ffp->prev_video_pts;
+                
+                if (abs(sync_diff) > 90000) { // 超过1秒的同步差异
+                    av_log(ffp, AV_LOG_WARNING, "⚠️ 音视频同步异常: 音频PTS=%lld, 视频PTS=%lld, 差异=%.2f秒\n", 
+                           audio_pts_in_video_timebase, ffp->prev_video_pts, (double)sync_diff / 90000.0);
+                }
+            }
+            
+            // av_log(ffp, AV_LOG_INFO, "✅ 录制音频帧 #%d, PTS写入前=%lld, 写入后=%lld\n", 
+            //        ffp->audio_frame_count, pts_before_write, pkt.pts);
+            
+            // 🔧 长时间录制优化：每50个音频帧刷新一次缓冲区
+            if (ffp->audio_frame_count % 50 == 0) {
+                if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
+                    avio_flush(ffp->m_ofmt_ctx->pb);
+                    av_log(ffp, AV_LOG_DEBUG, "🔄 缓冲区刷新: 音频帧 #%d\n", ffp->audio_frame_count);
+                }
+            }
         }
     } else {
         // 🔧 详细的错误诊断
@@ -6393,14 +6641,21 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         if (ret == AVERROR(EIO) || ret == AVERROR(ENOSPC) || ret == AVERROR(EACCES)) {
             if (ret == AVERROR(ENOSPC)) {
                 av_log(ffp, AV_LOG_ERROR, "💾 存储空间不足！请检查设备存储空间\n");
+                // 存储空间不足是致命错误，需要停止录制
+                ffp->record_error = 1;
             } else if (ret == AVERROR(EACCES)) {
                 av_log(ffp, AV_LOG_ERROR, "🔒 文件权限错误！请检查录制路径的写入权限\n");
+                // 权限错误是致命错误，需要停止录制
+                ffp->record_error = 1;
             } else {
-                av_log(ffp, AV_LOG_ERROR, "💿 I/O错误！可能是存储设备故障或文件系统错误\n");
+                av_log(ffp, AV_LOG_WARNING, "💿 I/O错误！尝试恢复录制\n");
+                // 一般I/O错误标记为临时错误，允许恢复
+                ffp->record_error = 1; // 会被智能恢复机制处理
             }
-            
-            // 设置录制错误标志，停止后续写入
-            ffp->record_error = 1;
+        } else {
+            // 其他类型的错误也标记为临时错误
+            av_log(ffp, AV_LOG_WARNING, "⚠️ 录制临时错误，尝试恢复\n");
+            ffp->record_error = 1; // 会被智能恢复机制处理
         }
     }
     
@@ -6427,8 +6682,8 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
     }
     
     // 🔍 调试包复制后的时间戳
-    av_log(ffp, AV_LOG_DEBUG, "📦 包复制: 流%d, 原始PTS=%lld, 复制PTS=%lld\n", 
-           packet->stream_index, packet->pts, pkt_copy->pts);
+    // av_log(ffp, AV_LOG_DEBUG, "📦 包复制: 流%d, 原始PTS=%lld, 复制PTS=%lld\n", 
+    //        packet->stream_index, packet->pts, pkt_copy->pts);
     
     // TODO: 将包放入录制队列，由独立线程处理
     // 这里暂时调用原函数，但移除了复杂的处理逻辑

@@ -611,6 +611,7 @@ typedef struct FFPlayer {
     int waiting_for_keyframe;           // a new field to indicate if we are waiting for the first video keyframe
     PacketQueue record_audio_queue;     // a new packet queue to buffer audio packets
     int64_t record_first_vpts;          // a new field to store the timestamp of the first keyframe
+    int64_t record_first_apts;          // 音频流的第一个时间戳基准
     AVAudioFifo *record_audio_fifo;     // FIFO for audio transcoding
     int64_t record_next_audio_pts;      // PTS for next audio frame to be encoded
 
@@ -892,6 +893,7 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->last_a_pts_for_rec             = AV_NOPTS_VALUE;
     ffp->waiting_for_keyframe           = 0;
     ffp->record_first_vpts              = AV_NOPTS_VALUE;
+    ffp->record_first_apts              = AV_NOPTS_VALUE;
     ffp->record_next_audio_pts          = 0;
     ffp->need_transcode                 = 0;
     ffp->enable_pcm_to_aac_transcode    = 0;
