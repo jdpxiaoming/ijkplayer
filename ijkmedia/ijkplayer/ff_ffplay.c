@@ -148,6 +148,9 @@
  
  static void free_picture(Frame *vp);
  
+// 🔧 统一调试开关：控制录制相关的详细日志输出
+#define DEBUG_RECORD_OPEN 0  // 设置为1开启调试日志，设置为0关闭
+
 // 录制相关函数声明
 static void fix_android15_recording_compatibility(FFPlayer *ffp);
 static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet);
@@ -5451,6 +5454,10 @@ static void ffp_reset_record_static_state(void);
                 av_log(ffp, AV_LOG_INFO, "🎵 其他音频格式(%s)：直接复制，保持原始参数", 
                        avcodec_get_name(in_codecpar->codec_id));
                 ffp->enable_pcm_to_aac_transcode = 0;  // 确保不转码
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🔧 已禁用PCM转码标志: enable_pcm_to_aac_transcode=%d", 
+                           ffp->enable_pcm_to_aac_transcode);
+                }
                 
                 // 先复制原始参数
                 if (avcodec_parameters_copy(out_stream->codecpar, in_codecpar) < 0) {
@@ -6065,7 +6072,25 @@ static void ffp_reset_record_static_state(void);
         // 🔧 长时间录制优化：写入文件尾前强制刷新所有缓冲区
         if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
             av_log(ffp, AV_LOG_INFO, "🔄 写入文件尾前强制刷新缓冲区\n");
-            avio_flush(ffp->m_ofmt_ctx->pb);
+            
+            // 🔧 长时间录制需要多次刷新确保数据完整
+            int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
+            int flush_count = 1;
+            if (recording_duration_sec > 1800) { // 30分钟以上
+                flush_count = 3;
+                av_log(ffp, AV_LOG_INFO, "🔧 长时间录制，执行%d次缓冲区刷新\n", flush_count);
+            } else if (recording_duration_sec > 600) { // 10分钟以上
+                flush_count = 2;
+                av_log(ffp, AV_LOG_INFO, "🔧 中等时长录制，执行%d次缓冲区刷新\n", flush_count);
+            }
+            
+            for (int i = 0; i < flush_count; i++) {
+                avio_flush(ffp->m_ofmt_ctx->pb);
+                if (flush_count > 1) {
+                    av_usleep(100000); // 100ms间隔
+                    av_log(ffp, AV_LOG_INFO, "🔄 完成第%d次缓冲区刷新\n", i + 1);
+                }
+            }
         }
         
         // 🔧 增强的文件尾写入：多次重试机制
@@ -6179,9 +6204,21 @@ static void ffp_reset_record_static_state(void);
     
     pthread_mutex_unlock(&ffp->record_mutex);
     
-    // 🔧 关键修复：增加更长的延迟，确保所有异步操作都能看到状态变化
-    av_log(ffp, AV_LOG_INFO, "🔧 等待异步录制操作完成...\n");
-    av_usleep(500000); // 500毫秒延迟，确保异步操作完成
+    // 🔧 关键修复：根据录制时长动态调整延迟时间
+    int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
+    int64_t wait_time_us = 500000; // 基础500毫秒
+    
+    // 🔧 长时间录制需要更长的等待时间
+    if (recording_duration_sec > 1800) { // 30分钟以上
+        wait_time_us = 2000000; // 2秒
+        av_log(ffp, AV_LOG_INFO, "🔧 检测到长时间录制(%lld秒)，延长等待时间到2秒\n", recording_duration_sec);
+    } else if (recording_duration_sec > 600) { // 10分钟以上
+        wait_time_us = 1000000; // 1秒
+        av_log(ffp, AV_LOG_INFO, "🔧 检测到中等时长录制(%lld秒)，延长等待时间到1秒\n", recording_duration_sec);
+    }
+    
+    av_log(ffp, AV_LOG_INFO, "🔧 等待异步录制操作完成... (等待时间: %lldms)\n", wait_time_us / 1000);
+    av_usleep(wait_time_us);
     
     // 🔧 额外的安全检查：再次确认所有状态都已重置
     ffp->is_record = 0;
@@ -6192,6 +6229,19 @@ static void ffp_reset_record_static_state(void);
     
     // 🔧 重置所有静态变量
     ffp_reset_record_static_state();
+    
+    // 🔧 长时间录制额外安全检查：确保所有I/O操作完成
+    if (recording_duration_sec > 600) { // 10分钟以上
+        av_log(ffp, AV_LOG_INFO, "🔧 长时间录制额外安全检查，再次等待I/O完成...\n");
+        av_usleep(200000); // 额外200ms等待
+        
+        // 🔧 最后一次状态确认
+        ffp->is_record = 0;
+        ffp->m_ofmt_ctx = NULL;
+        ffp->m_ofmt = NULL;
+        ffp->stream_mapping = NULL;
+        av_log(ffp, AV_LOG_INFO, "🔧 长时间录制最终状态确认完成\n");
+    }
     
     // 🔧 现在安全地释放资源（在锁外进行，避免死锁）
     if (temp_ofmt_ctx) {
@@ -6473,9 +6523,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                packet->stream_index, stream->codecpar->codec_type, stream->codecpar->codec_id, packet->size, packet->pts);
         
         // 🔍 额外调试：确认音频包的处理路径
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            av_log(ffp, AV_LOG_INFO, "🔍 确认音频包: codec_id=%d, 是否ALAW=%d, enable_transcode=%d\n", 
+        if (DEBUG_RECORD_OPEN && stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            av_log(ffp, AV_LOG_INFO, "🔍 确认音频包: codec_id=%d(%s), 是否ALAW=%d, enable_transcode=%d\n", 
                    stream->codecpar->codec_id, 
+                   avcodec_get_name(stream->codecpar->codec_id),
                    (stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW),
                    ffp->enable_pcm_to_aac_transcode);
         }
@@ -6615,8 +6666,20 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         }
     } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         // 🎯 音频处理：检查是否需要PCM_ALAW转AAC
-        if (ffp->enable_pcm_to_aac_transcode && (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
-            av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支\n");
+        // 🔧 关键修复：增强检查，确保只有真正的PCM_ALAW/MULAW才进入转码分支
+        bool is_pcm_alaw = (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW);
+        bool is_pcm_mulaw = (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW);
+        bool should_transcode = ffp->enable_pcm_to_aac_transcode && (is_pcm_alaw || is_pcm_mulaw);
+        
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔍 转码检查: codec_id=%d(%s), enable_transcode=%d, is_alaw=%d, is_mulaw=%d, should_transcode=%d\n", 
+                   in_stream->codecpar->codec_id, avcodec_get_name(in_stream->codecpar->codec_id),
+                   ffp->enable_pcm_to_aac_transcode, is_pcm_alaw, is_pcm_mulaw, should_transcode);
+        }
+        
+        if (should_transcode) {
+            av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支: codec_id=%d(%s)\n", 
+                   in_stream->codecpar->codec_id, avcodec_get_name(in_stream->codecpar->codec_id));
             AVFrame *dec_frame = av_frame_alloc();
             if (!dec_frame) { 
                 av_log(ffp, AV_LOG_ERROR, "❌ 无法分配解码帧\n");
@@ -6624,28 +6687,34 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
             }
             
             // 🔍 调试解码器状态
-            av_log(ffp, AV_LOG_INFO, "🔍 解码器检查: ctx=%p, codec=%s, 包大小=%d, pts=%lld\n", 
-                   ffp->audio_dec_ctx_record, 
-                   ffp->audio_dec_ctx_record ? ffp->audio_dec_ctx_record->codec->name : "NULL",
-                   pkt.size, pkt.pts);
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🔍 解码器检查: ctx=%p, codec=%s, 包大小=%d, pts=%lld\n", 
+                       ffp->audio_dec_ctx_record, 
+                       ffp->audio_dec_ctx_record ? ffp->audio_dec_ctx_record->codec->name : "NULL",
+                       pkt.size, pkt.pts);
+            }
             
             int send_ret = avcodec_send_packet(ffp->audio_dec_ctx_record, &pkt);
-            av_log(ffp, AV_LOG_INFO, "🔍 avcodec_send_packet返回: %d (%s)\n", send_ret, av_err2str(send_ret));
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🔍 avcodec_send_packet返回: %d (%s)\n", send_ret, av_err2str(send_ret));
+            }
             
             if (send_ret == 0) {
                 int receive_ret;
                 while ((receive_ret = avcodec_receive_frame(ffp->audio_dec_ctx_record, dec_frame)) == 0) {
-                    av_log(ffp, AV_LOG_INFO, "🔍 avcodec_receive_frame成功\n");
-                    // 🔧 PCM_ALAW解码调试信息
-                    av_log(ffp, AV_LOG_INFO, "🎵 PCM_ALAW解码帧: %d样本, 格式:%s, 采样率:%d, 通道:%d\n",
-                           dec_frame->nb_samples,
-                           av_get_sample_fmt_name(dec_frame->format),
-                           dec_frame->sample_rate,
-                           dec_frame->channels);
-                    
-                    // 检查解码帧是否包含音频信号
-                    if (dec_frame->nb_samples > 0) {
-                        av_log(ffp, AV_LOG_INFO, "🔊 PCM_ALAW帧包含音频信号\n");
+                    if (DEBUG_RECORD_OPEN) {
+                        av_log(ffp, AV_LOG_INFO, "🔍 avcodec_receive_frame成功\n");
+                        // 🔧 PCM_ALAW解码调试信息
+                        av_log(ffp, AV_LOG_INFO, "🎵 PCM_ALAW解码帧: %d样本, 格式:%s, 采样率:%d, 通道:%d\n",
+                               dec_frame->nb_samples,
+                               av_get_sample_fmt_name(dec_frame->format),
+                               dec_frame->sample_rate,
+                               dec_frame->channels);
+                        
+                        // 检查解码帧是否包含音频信号
+                        if (dec_frame->nb_samples > 0) {
+                            av_log(ffp, AV_LOG_INFO, "🔊 PCM_ALAW帧包含音频信号\n");
+                        }
                     }
                     
                     // 重采样到AAC编码器需要的格式
@@ -6675,7 +6744,9 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                                        (const uint8_t**)dec_frame->data, dec_frame->nb_samples);
                     
                     if (output_nb_samples > 0) {
-                        av_log(ffp, AV_LOG_INFO, "🔄 重采样成功: %d -> %d 样本\n", dec_frame->nb_samples, output_nb_samples);
+                        if (DEBUG_RECORD_OPEN) {
+                            av_log(ffp, AV_LOG_INFO, "🔄 重采样成功: %d -> %d 样本\n", dec_frame->nb_samples, output_nb_samples);
+                        }
                         
                         // 🔧 关键修复：使用音频FIFO缓冲区确保连续性
                         if (!ffp->record_audio_fifo) {
@@ -6687,7 +6758,9 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                 av_frame_free(&resampled_frame);
                                 continue;
                             }
-                            av_log(ffp, AV_LOG_INFO, "🔧 创建音频FIFO缓冲区: %d样本容量\n", 8192);
+                            if (DEBUG_RECORD_OPEN) {
+                                av_log(ffp, AV_LOG_INFO, "🔧 创建音频FIFO缓冲区: %d样本容量\n", 8192);
+                            }
                         }
                         
                         // 🔧 将重采样后的数据写入FIFO缓冲区
@@ -6700,8 +6773,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                             continue;
                         }
                         
-                        av_log(ffp, AV_LOG_INFO, "🔧 写入FIFO: %d样本, 缓冲区大小: %d样本\n", 
-                               output_nb_samples, av_audio_fifo_size(ffp->record_audio_fifo));
+                        if (DEBUG_RECORD_OPEN) {
+                            av_log(ffp, AV_LOG_INFO, "🔧 写入FIFO: %d样本, 缓冲区大小: %d样本\n", 
+                                   output_nb_samples, av_audio_fifo_size(ffp->record_audio_fifo));
+                        }
                         
                         // 🔧 AAC帧大小
                         const int aac_frame_size = 1024; // AAC标准帧大小
@@ -6737,8 +6812,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                 break;
                             }
                             
-                            av_log(ffp, AV_LOG_INFO, "🎵 从FIFO读取AAC帧: %d样本, 剩余: %d样本\n", 
-                                   read_samples, av_audio_fifo_size(ffp->record_audio_fifo));
+                            if (DEBUG_RECORD_OPEN) {
+                                av_log(ffp, AV_LOG_INFO, "🎵 从FIFO读取AAC帧: %d样本, 剩余: %d样本\n", 
+                                       read_samples, av_audio_fifo_size(ffp->record_audio_fifo));
+                            }
                             
                             // 编码AAC帧
                             int encode_ret = avcodec_send_frame(ffp->audio_enc_ctx, aac_frame);
@@ -6746,7 +6823,9 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                 AVPacket aac_pkt;
                                 av_init_packet(&aac_pkt);
                                 while (avcodec_receive_packet(ffp->audio_enc_ctx, &aac_pkt) == 0) {
-                                    av_log(ffp, AV_LOG_INFO, "🎵 AAC编码成功: size=%d\n", aac_pkt.size);
+                                    if (DEBUG_RECORD_OPEN) {
+                                        av_log(ffp, AV_LOG_INFO, "🎵 AAC编码成功: size=%d\n", aac_pkt.size);
+                                    }
                                     
                                     // 🔧 关键修复：基于连续AAC帧的时间戳计算
                                     aac_pkt.stream_index = out_stream_index;
@@ -6768,8 +6847,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                                ffp->audio_frame_count * aac_frame_duration, aac_pkt.dts);
                                     }
                                     
-                                    av_log(ffp, AV_LOG_INFO, "🕐 AAC时间戳: pts=%lld, dts=%lld, 帧#%d, 时长=%lld\n", 
-                                           aac_pkt.pts, aac_pkt.dts, ffp->audio_frame_count, aac_frame_duration);
+                                    if (DEBUG_RECORD_OPEN) {
+                                        av_log(ffp, AV_LOG_INFO, "🕐 AAC时间戳: pts=%lld, dts=%lld, 帧#%d, 时长=%lld\n", 
+                                               aac_pkt.pts, aac_pkt.dts, ffp->audio_frame_count, aac_frame_duration);
+                                    }
                                     
                                     // 写入AAC包
                                     int write_ret = av_write_frame(ffp->m_ofmt_ctx, &aac_pkt);
@@ -6777,8 +6858,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                         // 🔧 更新全局DTS追踪和音频帧计数
                                         ffp->last_audio_dts = aac_pkt.dts;
                                         ffp->audio_frame_count++; // 每个AAC帧递增计数
-                                        av_log(ffp, AV_LOG_INFO, "✅ AAC包写入成功, 帧#%d, DTS: %lld\n", 
-                                               ffp->audio_frame_count, ffp->last_audio_dts);
+                                        if (DEBUG_RECORD_OPEN) {
+                                            av_log(ffp, AV_LOG_INFO, "✅ AAC包写入成功, 帧#%d, DTS: %lld\n", 
+                                                   ffp->audio_frame_count, ffp->last_audio_dts);
+                                        }
                                     } else {
                                         av_log(ffp, AV_LOG_ERROR, "❌ AAC包写入失败: %s\n", av_err2str(write_ret));
                                     }
@@ -6791,8 +6874,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                             av_frame_free(&aac_frame);
                         }
                         
-                        av_log(ffp, AV_LOG_INFO, "✅ PCM_ALAW包处理完成, FIFO剩余: %d样本\n", 
-                               av_audio_fifo_size(ffp->record_audio_fifo));
+                        if (DEBUG_RECORD_OPEN) {
+                            av_log(ffp, AV_LOG_INFO, "✅ PCM_ALAW包处理完成, FIFO剩余: %d样本\n", 
+                                   av_audio_fifo_size(ffp->record_audio_fifo));
+                        }
                     } else {
                         av_log(ffp, AV_LOG_ERROR, "❌ 重采样失败\n");
                     }
@@ -6816,6 +6901,13 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         }
         
 audio_normal_process:
+        // 🔧 关键修复：AAC等其他音频格式的正常处理分支
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🎵 音频正常处理分支: codec_id=%d(%s), enable_transcode=%d\n", 
+                   in_stream->codecpar->codec_id, avcodec_get_name(in_stream->codecpar->codec_id), 
+                   ffp->enable_pcm_to_aac_transcode);
+        }
+        
         // 音频流使用独立的基准时间戳
         if (ffp->record_first_apts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
             ffp->record_first_apts = pkt.pts;
@@ -7007,7 +7099,7 @@ audio_normal_process:
 // 🚀 异步录制函数：避免阻塞主播放线程
 static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
     // 🔍 调试：检查进入的数据包
-    if (packet) {
+    if (DEBUG_RECORD_OPEN && packet) {
         VideoState *is = ffp->is;
         if (is && is->ic && packet->stream_index < is->ic->nb_streams) {
             AVStream *stream = is->ic->streams[packet->stream_index];
