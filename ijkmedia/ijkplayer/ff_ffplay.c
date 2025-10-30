@@ -3709,12 +3709,14 @@ static void ffp_reset_record_static_state(void);
                        ffp_record_file_async(ffp, pkt);
                        
                        // 🔍 调试日志：确认录制调用
-                       if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                           av_log(ffp, AV_LOG_INFO, "🎬 录制视频包调用: 流%d, PTS=%lld\n", 
-                                  pkt->stream_index, pkt->pts);
-                       } else {
-                           av_log(ffp, AV_LOG_INFO, "🔊 录制音频包调用: 流%d, PTS=%lld\n", 
-                                  pkt->stream_index, pkt->pts);
+                       if (DEBUG_RECORD_OPEN) {
+                           if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                               av_log(ffp, AV_LOG_INFO, "🎬 录制视频包调用: 流%d, PTS=%lld\n", 
+                                      pkt->stream_index, pkt->pts);
+                           } else {
+                               av_log(ffp, AV_LOG_INFO, "🔊 录制音频包调用: 流%d, PTS=%lld\n", 
+                                      pkt->stream_index, pkt->pts);
+                           }
                        }
                    }
                }
@@ -5269,8 +5271,10 @@ static void ffp_reset_record_static_state(void);
      }
  
      // 🔍 详细检查输入流信息
-     av_log(ffp, AV_LOG_INFO, "📊 输入流总数: %d, 视频流: %d, 音频流: %d, 音频禁用: %d", 
-            is->ic->nb_streams, is->video_stream, is->audio_stream, ffp->audio_disable);
+     if (DEBUG_RECORD_OPEN) {
+         av_log(ffp, AV_LOG_INFO, "📊 输入流总数: %d, 视频流: %d, 音频流: %d, 音频禁用: %d", 
+                is->ic->nb_streams, is->video_stream, is->audio_stream, ffp->audio_disable);
+     }
  
      for (i = 0; i < is->ic->nb_streams; i++) {
          ffp->stream_mapping[i] = -1;
@@ -5295,7 +5299,9 @@ static void ffp_reset_record_static_state(void);
          } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
              // 🎯 关键修复：录制音频但不干扰播放
              // 只要是音频流就录制，不管播放器是否启用
-             av_log(ffp, AV_LOG_INFO, "🔊 录制音频流 %d (播放器音频流: %d)\n", i, is->audio_stream);
+             if (DEBUG_RECORD_OPEN) {
+                 av_log(ffp, AV_LOG_INFO, "🔊 录制音频流 %d (播放器音频流: %d)\n", i, is->audio_stream);
+             }
          }
          
         ffp->stream_mapping[i] = ffp->nb_output_streams++;
@@ -5315,9 +5321,11 @@ static void ffp_reset_record_static_state(void);
              av_log(ffp, AV_LOG_INFO, "📹 映射视频流 %d -> %d, codec: %d, 格式标签: %s", 
                     i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, codec_tag_str);
          } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-             av_log(ffp, AV_LOG_INFO, "🔊 映射音频流 %d -> %d, codec: %d, 采样率: %d, 声道: %d", 
-                    i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, 
-                    in_stream->codecpar->sample_rate, in_stream->codecpar->channels);
+             if (DEBUG_RECORD_OPEN) {
+                 av_log(ffp, AV_LOG_INFO, "🔊 映射音频流 %d -> %d, codec: %d, 采样率: %d, 声道: %d", 
+                        i, ffp->stream_mapping[i], in_stream->codecpar->codec_id, 
+                        in_stream->codecpar->sample_rate, in_stream->codecpar->channels);
+             }
          }
          
          // 对照输入流创建输出流通道
@@ -5339,8 +5347,10 @@ static void ffp_reset_record_static_state(void);
                                       in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW);
                  
             if (need_transcode && strstr(file_name, ".mp4")) {
-                av_log(ffp, AV_LOG_INFO, "🔊 检测到PCMA/PCMU音频，启用AAC转码 - 原始codec: %s", 
-                       avcodec_get_name(in_codecpar->codec_id));
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🔊 检测到PCMA/PCMU音频，启用AAC转码 - 原始codec: %s", 
+                           avcodec_get_name(in_codecpar->codec_id));
+                }
                      ffp->enable_pcm_to_aac_transcode = 1;
                      
                      // 🔧 初始化PCM_ALAW解码器
@@ -5350,7 +5360,9 @@ static void ffp_reset_record_static_state(void);
                          goto end; 
                      }
                      
-                     av_log(ffp, AV_LOG_INFO, "🔊 找到PCM解码器: %s\n", dec->name);
+                     if (DEBUG_RECORD_OPEN) {
+                         av_log(ffp, AV_LOG_INFO, "🔊 找到PCM解码器: %s\n", dec->name);
+                     }
                      
                      ffp->audio_dec_ctx_record = avcodec_alloc_context3(dec);
                      if (!ffp->audio_dec_ctx_record) { 
@@ -5368,12 +5380,14 @@ static void ffp_reset_record_static_state(void);
                          ffp->audio_dec_ctx_record->channel_layout = av_get_default_channel_layout(ffp->audio_dec_ctx_record->channels);
                      }
                      
-                     av_log(ffp, AV_LOG_INFO, "🔊 PCM_ALAW解码器配置: %s, %dHz, %d通道, 布局:%lld, 格式:%s\n",
-                            avcodec_get_name(ffp->audio_dec_ctx_record->codec_id),
-                            ffp->audio_dec_ctx_record->sample_rate,
-                            ffp->audio_dec_ctx_record->channels,
-                            ffp->audio_dec_ctx_record->channel_layout,
-                            av_get_sample_fmt_name(ffp->audio_dec_ctx_record->sample_fmt));
+                     if (DEBUG_RECORD_OPEN) {
+                         av_log(ffp, AV_LOG_INFO, "🔊 PCM_ALAW解码器配置: %s, %dHz, %d通道, 布局:%lld, 格式:%s\n",
+                                avcodec_get_name(ffp->audio_dec_ctx_record->codec_id),
+                                ffp->audio_dec_ctx_record->sample_rate,
+                                ffp->audio_dec_ctx_record->channels,
+                                ffp->audio_dec_ctx_record->channel_layout,
+                                av_get_sample_fmt_name(ffp->audio_dec_ctx_record->sample_fmt));
+                     }
                      
                      if (avcodec_open2(ffp->audio_dec_ctx_record, dec, NULL) < 0) { 
                          av_log(ffp, AV_LOG_ERROR, "❌ 打开音频解码器失败\n"); 
@@ -5391,7 +5405,9 @@ static void ffp_reset_record_static_state(void);
                      // 🔧 PCM_ALAW转码优化：使用标准AAC采样率44100Hz，提升音质和兼容性
                      if (in_codecpar->codec_id == AV_CODEC_ID_PCM_ALAW || in_codecpar->codec_id == AV_CODEC_ID_PCM_MULAW) {
                          ffp->audio_enc_ctx->sample_rate = 44100; // 标准AAC采样率
-                         av_log(ffp, AV_LOG_INFO, "🔧 PCM_ALAW转码：上采样到44100Hz以提升音质\n");
+                         if (DEBUG_RECORD_OPEN) {
+                             av_log(ffp, AV_LOG_INFO, "🔧 PCM_ALAW转码：上采样到44100Hz以提升音质\n");
+                         }
                      } else {
                          ffp->audio_enc_ctx->sample_rate = in_codecpar->sample_rate > 0 ? in_codecpar->sample_rate : 44100;
                      }
@@ -5403,8 +5419,10 @@ static void ffp_reset_record_static_state(void);
                      ffp->audio_enc_ctx->bit_rate = ffp->audio_enc_ctx->channels == 1 ? 64000 : 
                                                    (ffp->audio_enc_ctx->channels == 2 ? 128000 : 192000);
                      
-                     av_log(ffp, AV_LOG_INFO, "🔊 AAC编码器配置 - 采样率:%d, 通道数:%d, 比特率:%d", 
-                            ffp->audio_enc_ctx->sample_rate, ffp->audio_enc_ctx->channels, ffp->audio_enc_ctx->bit_rate);
+                     if (DEBUG_RECORD_OPEN) {
+                         av_log(ffp, AV_LOG_INFO, "🔊 AAC编码器配置 - 采样率:%d, 通道数:%d, 比特率:%d", 
+                                ffp->audio_enc_ctx->sample_rate, ffp->audio_enc_ctx->channels, ffp->audio_enc_ctx->bit_rate);
+                     }
                      ffp->audio_enc_ctx->time_base = (AVRational){1, ffp->audio_enc_ctx->sample_rate};
                      ffp->audio_enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
                      if (avcodec_open2(ffp->audio_enc_ctx, enc, NULL) < 0) { av_log(ffp, AV_LOG_ERROR, "打开AAC编码器失败\n"); goto end; }
@@ -5413,19 +5431,23 @@ static void ffp_reset_record_static_state(void);
                      int64_t in_ch_layout = ffp->audio_dec_ctx_record->channel_layout;
                      if (in_ch_layout == 0) {
                          in_ch_layout = av_get_default_channel_layout(ffp->audio_dec_ctx_record->channels);
-                         av_log(ffp, AV_LOG_INFO, "🔧 PCM_ALAW: 设置默认通道布局 %lld (通道数:%d)\n", 
-                                in_ch_layout, ffp->audio_dec_ctx_record->channels);
+                         if (DEBUG_RECORD_OPEN) {
+                             av_log(ffp, AV_LOG_INFO, "🔧 PCM_ALAW: 设置默认通道布局 %lld (通道数:%d)\n", 
+                                    in_ch_layout, ffp->audio_dec_ctx_record->channels);
+                         }
                      }
                      
-                     av_log(ffp, AV_LOG_INFO, "🔊 重采样配置 - 输入: %s %dHz %d通道(布局:%lld) -> 输出: %s %dHz %d通道(布局:%lld)\n",
-                            av_get_sample_fmt_name(ffp->audio_dec_ctx_record->sample_fmt),
-                            ffp->audio_dec_ctx_record->sample_rate,
-                            ffp->audio_dec_ctx_record->channels,
-                            in_ch_layout,
-                            av_get_sample_fmt_name(ffp->audio_enc_ctx->sample_fmt),
-                            ffp->audio_enc_ctx->sample_rate,
-                            ffp->audio_enc_ctx->channels,
-                            ffp->audio_enc_ctx->channel_layout);
+                     if (DEBUG_RECORD_OPEN) {
+                         av_log(ffp, AV_LOG_INFO, "🔊 重采样配置 - 输入: %s %dHz %d通道(布局:%lld) -> 输出: %s %dHz %d通道(布局:%lld)\n",
+                                av_get_sample_fmt_name(ffp->audio_dec_ctx_record->sample_fmt),
+                                ffp->audio_dec_ctx_record->sample_rate,
+                                ffp->audio_dec_ctx_record->channels,
+                                in_ch_layout,
+                                av_get_sample_fmt_name(ffp->audio_enc_ctx->sample_fmt),
+                                ffp->audio_enc_ctx->sample_rate,
+                                ffp->audio_enc_ctx->channels,
+                                ffp->audio_enc_ctx->channel_layout);
+                     }
                      
                      ffp->swr_ctx_record = swr_alloc_set_opts(NULL,
                                                              ffp->audio_enc_ctx->channel_layout, ffp->audio_enc_ctx->sample_fmt, ffp->audio_enc_ctx->sample_rate,
@@ -5491,7 +5513,9 @@ static void ffp_reset_record_static_state(void);
                  goto end;
              }
              out_stream->time_base = (AVRational){1, 90000};
-             av_log(ffp, AV_LOG_INFO, "🎬 视频录制时间基准: 1/90000\n");
+             if (DEBUG_RECORD_OPEN) {
+                 av_log(ffp, AV_LOG_INFO, "🎬 视频录制时间基准: 1/90000\n");
+             }
          }
          
          out_stream->codecpar->codec_tag = 0;
@@ -5722,7 +5746,9 @@ static void ffp_reset_record_static_state(void);
      ffp->last_video_dts = AV_NOPTS_VALUE;
      ffp->last_audio_dts = AV_NOPTS_VALUE;
      
-     av_log(ffp, AV_LOG_INFO, "🎬 录制变量初始化完成\n");
+     if (DEBUG_RECORD_OPEN) {
+         av_log(ffp, AV_LOG_INFO, "🎬 录制变量初始化完成\n");
+     }
      
      // 🔧 初始化帧间隔跟踪字段
      ffp->prev_video_pts = AV_NOPTS_VALUE;
@@ -5947,8 +5973,10 @@ static void ffp_reset_record_static_state(void);
          }
         
         // 🔧 在写入trailer之前，最后一次确保duration正确
-        av_log(ffp, AV_LOG_INFO, "📊 录制统计 - 视频帧: %d, 音频帧: %d", 
-               ffp->video_frame_count, ffp->audio_frame_count);
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "📊 录制统计 - 视频帧: %d, 音频帧: %d", 
+                   ffp->video_frame_count, ffp->audio_frame_count);
+        }
         
         // 🎯 简化修复：直接使用备用方案的duration（已经是正确的）
         double final_duration_sec = 0;
@@ -6071,24 +6099,32 @@ static void ffp_reset_record_static_state(void);
         
         // 🔧 长时间录制优化：写入文件尾前强制刷新所有缓冲区
         if (ffp->m_ofmt_ctx && ffp->m_ofmt_ctx->pb) {
-            av_log(ffp, AV_LOG_INFO, "🔄 写入文件尾前强制刷新缓冲区\n");
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🔄 写入文件尾前强制刷新缓冲区\n");
+            }
             
             // 🔧 长时间录制需要多次刷新确保数据完整
             int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
             int flush_count = 1;
             if (recording_duration_sec > 1800) { // 30分钟以上
                 flush_count = 3;
-                av_log(ffp, AV_LOG_INFO, "🔧 长时间录制，执行%d次缓冲区刷新\n", flush_count);
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🔧 长时间录制，执行%d次缓冲区刷新\n", flush_count);
+                }
             } else if (recording_duration_sec > 600) { // 10分钟以上
                 flush_count = 2;
-                av_log(ffp, AV_LOG_INFO, "🔧 中等时长录制，执行%d次缓冲区刷新\n", flush_count);
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🔧 中等时长录制，执行%d次缓冲区刷新\n", flush_count);
+                }
             }
             
             for (int i = 0; i < flush_count; i++) {
                 avio_flush(ffp->m_ofmt_ctx->pb);
                 if (flush_count > 1) {
                     av_usleep(100000); // 100ms间隔
-                    av_log(ffp, AV_LOG_INFO, "🔄 完成第%d次缓冲区刷新\n", i + 1);
+                    if (DEBUG_RECORD_OPEN) {
+                        av_log(ffp, AV_LOG_INFO, "🔄 完成第%d次缓冲区刷新\n", i + 1);
+                    }
                 }
             }
         }
@@ -6141,7 +6177,7 @@ static void ffp_reset_record_static_state(void);
         // TODO: 重新启用并修复崩溃问题
         if (recorded_file_path && strlen(recorded_file_path) > 0) {
             av_log(ffp, AV_LOG_INFO, "📋 录制完成，文件路径: %s\n", recorded_file_path);
-            av_log(ffp, AV_LOG_INFO, "🔧 MP4完整性检查已暂时禁用（避免崩溃）\n");
+            // av_log(ffp, AV_LOG_INFO, "🔧 MP4完整性检查已暂时禁用（避免崩溃）\n");
             
             // 简单的文件存在检查
             FILE *file = fopen(recorded_file_path, "rb");
@@ -6149,7 +6185,9 @@ static void ffp_reset_record_static_state(void);
                 fseek(file, 0, SEEK_END);
                 long file_size = ftell(file);
                 fclose(file);
-                av_log(ffp, AV_LOG_INFO, "📊 录制文件大小: %ld 字节\n", file_size);
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "📊 录制文件大小: %ld 字节\n", file_size);
+                }
             } else {
                 av_log(ffp, AV_LOG_ERROR, "❌ 无法访问录制文件\n");
             }
@@ -6176,7 +6214,7 @@ static void ffp_reset_record_static_state(void);
         
         // 🔧 修复时长问题：重置流级别时间戳基准（需要放在ffp_record_file外部访问）
         // 这里通过函数标志来触发重置
-        av_log(ffp, AV_LOG_INFO, "📋 录制停止，流级别时间戳基准将在下次录制时重置\n");
+        // av_log(ffp, AV_LOG_INFO, "📋 录制停止，流级别时间戳基准将在下次录制时重置\n");
     }
     
     // 🔧 关键修复：先保存需要释放的资源，然后设置录制状态为停止
@@ -6211,13 +6249,19 @@ static void ffp_reset_record_static_state(void);
     // 🔧 长时间录制需要更长的等待时间
     if (recording_duration_sec > 1800) { // 30分钟以上
         wait_time_us = 2000000; // 2秒
-        av_log(ffp, AV_LOG_INFO, "🔧 检测到长时间录制(%lld秒)，延长等待时间到2秒\n", recording_duration_sec);
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 检测到长时间录制(%lld秒)，延长等待时间到2秒\n", recording_duration_sec);
+        }
     } else if (recording_duration_sec > 600) { // 10分钟以上
         wait_time_us = 1000000; // 1秒
-        av_log(ffp, AV_LOG_INFO, "🔧 检测到中等时长录制(%lld秒)，延长等待时间到1秒\n", recording_duration_sec);
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 检测到中等时长录制(%lld秒)，延长等待时间到1秒\n", recording_duration_sec);
+        }
     }
     
-    av_log(ffp, AV_LOG_INFO, "🔧 等待异步录制操作完成... (等待时间: %lldms)\n", wait_time_us / 1000);
+    if (DEBUG_RECORD_OPEN) {
+        av_log(ffp, AV_LOG_INFO, "🔧 等待异步录制操作完成... (等待时间: %lldms)\n", wait_time_us / 1000);
+    }
     av_usleep(wait_time_us);
     
     // 🔧 额外的安全检查：再次确认所有状态都已重置
@@ -6225,14 +6269,18 @@ static void ffp_reset_record_static_state(void);
     ffp->m_ofmt_ctx = NULL;
     ffp->m_ofmt = NULL;
     ffp->stream_mapping = NULL;
-    av_log(ffp, AV_LOG_INFO, "🔧 二次确认录制状态已重置\n");
+    if (DEBUG_RECORD_OPEN) {
+        av_log(ffp, AV_LOG_INFO, "🔧 二次确认录制状态已重置\n");
+    }
     
     // 🔧 重置所有静态变量
     ffp_reset_record_static_state();
     
     // 🔧 长时间录制额外安全检查：确保所有I/O操作完成
     if (recording_duration_sec > 600) { // 10分钟以上
-        av_log(ffp, AV_LOG_INFO, "🔧 长时间录制额外安全检查，再次等待I/O完成...\n");
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 长时间录制额外安全检查，再次等待I/O完成...\n");
+        }
         av_usleep(200000); // 额外200ms等待
         
         // 🔧 最后一次状态确认
@@ -6240,34 +6288,41 @@ static void ffp_reset_record_static_state(void);
         ffp->m_ofmt_ctx = NULL;
         ffp->m_ofmt = NULL;
         ffp->stream_mapping = NULL;
-        av_log(ffp, AV_LOG_INFO, "🔧 长时间录制最终状态确认完成\n");
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 长时间录制最终状态确认完成\n");
+        }
     }
     
     // 🔧 现在安全地释放资源（在锁外进行，避免死锁）
     if (temp_ofmt_ctx) {
         avformat_free_context(temp_ofmt_ctx);
-        av_log(ffp, AV_LOG_INFO, "🔧 格式上下文已安全释放\n");
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 格式上下文已安全释放\n");
+        }
     }
     
     if (temp_stream_mapping) {
         av_free(temp_stream_mapping);
-        av_log(ffp, AV_LOG_INFO, "🔧 流映射表已安全释放\n");
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 流映射表已安全释放\n");
+        }
     }
     
     // 注意：不在这里销毁互斥锁，避免read_thread中的竞态条件
     // 互斥锁将在ffp_reset_internal或ffp_destroy中统一处理
-    
-    av_log(ffp, AV_LOG_INFO, "✅ 录制停止完成\n");
+    if (DEBUG_RECORD_OPEN) {
+        av_log(ffp, AV_LOG_INFO, "✅ 录制停止完成\n");
+    }
     
     // H265后处理：暂时禁用重编码，避免播放中断
-    if (has_hevc_stream && recorded_file_path) {
-        av_log(ffp, AV_LOG_INFO, "🔄 检测到H265视频流，但暂时跳过重编码以避免播放中断: %s\n", recorded_file_path);
+    // if (has_hevc_stream && recorded_file_path) {
+        // av_log(ffp, AV_LOG_INFO, "🔄 检测到H265视频流，但暂时跳过重编码以避免播放中断: %s\n", recorded_file_path);
         // 🔧 临时禁用重编码，因为会导致播放中断
         // int reencoding_ret = ffp_start_h265_reencoding(ffp, recorded_file_path);
         // if (reencoding_ret != 0) {
         //     av_log(ffp, AV_LOG_ERROR, "❌ 启动H265重编码失败: %d\n", reencoding_ret);
         // }
-    }
+    // }
     
     // 清理内存
     if (recorded_file_path) {
@@ -6287,7 +6342,9 @@ static void ffp_reset_record_static_state(void);
     ffp->avg_audio_duration = 0;
     ffp->video_frame_count = 0;
     ffp->audio_frame_count = 0;
-    av_log(ffp, AV_LOG_INFO, "🔧 录制状态变量已重置\n");
+    if (DEBUG_RECORD_OPEN) {
+        av_log(ffp, AV_LOG_INFO, "🔧 录制状态变量已重置\n");
+    }
     
     return 0;   
  }
@@ -6487,7 +6544,9 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         consecutive_errors = 0;
         last_error_time = 0;
         g_reset_static_vars = 0; // 重置标志
-        av_log(ffp, AV_LOG_INFO, "🔧 已重置录制函数静态变量\n");
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔧 已重置录制函数静态变量\n");
+        }
     }
     
     if (ffp->record_error) {
@@ -6497,7 +6556,9 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         if (current_time - last_error_time > 5000) {
             consecutive_errors = 0;
             ffp->record_error = 0; // 重置错误状态
-            av_log(ffp, AV_LOG_INFO, "🔄 录制错误状态已重置，恢复录制\n");
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🔄 录制错误状态已重置，恢复录制\n");
+            }
         } else {
             consecutive_errors++;
             
@@ -6519,8 +6580,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     // 🔍 调试：检查进入简化录制函数的数据包
     if (is && is->ic && packet->stream_index < is->ic->nb_streams) {
         AVStream *stream = is->ic->streams[packet->stream_index];
-        av_log(ffp, AV_LOG_INFO, "🔍 简化录制函数收到包: 流%d, 类型=%d, codec_id=%d, size=%d, pts=%lld\n", 
-               packet->stream_index, stream->codecpar->codec_type, stream->codecpar->codec_id, packet->size, packet->pts);
+        if (DEBUG_RECORD_OPEN) {
+            av_log(ffp, AV_LOG_INFO, "🔍 简化录制函数收到包: 流%d, 类型=%d, codec_id=%d, size=%d, pts=%lld\n", 
+                   packet->stream_index, stream->codecpar->codec_type, stream->codecpar->codec_id, packet->size, packet->pts);
+        }
         
         // 🔍 额外调试：确认音频包的处理路径
         if (DEBUG_RECORD_OPEN && stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -6606,8 +6669,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
             } else {
                 ffp->waiting_for_keyframe = 0; // 找到关键帧，开始录制
                 keyframe_wait_count = 0; // 重置计数器
-                av_log(ffp, AV_LOG_INFO, "🎯 H265: 找到关键帧，开始录制 PTS=%lld, flags=0x%x, size=%d\n", 
-                       packet->pts, packet->flags, packet->size);
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🎯 H265: 找到关键帧，开始录制 PTS=%lld, flags=0x%x, size=%d\n", 
+                           packet->pts, packet->flags, packet->size);
+                }
                 
                 // 🔧 关键修复：确保第一个关键帧包含完整的参数集
                 AVStream *out_stream = ffp->m_ofmt_ctx->streams[out_stream_index];
@@ -6678,8 +6743,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         }
         
         if (should_transcode) {
-            av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支: codec_id=%d(%s)\n", 
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支: codec_id=%d(%s)\n", 
                    in_stream->codecpar->codec_id, avcodec_get_name(in_stream->codecpar->codec_id));
+            }
             AVFrame *dec_frame = av_frame_alloc();
             if (!dec_frame) { 
                 av_log(ffp, AV_LOG_ERROR, "❌ 无法分配解码帧\n");
@@ -6888,10 +6955,14 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                 if (receive_ret != AVERROR(EAGAIN) && receive_ret != AVERROR_EOF) {
                     av_log(ffp, AV_LOG_ERROR, "❌ avcodec_receive_frame失败: %d (%s)\n", receive_ret, av_err2str(receive_ret));
                 } else {
-                    av_log(ffp, AV_LOG_INFO, "🔍 avcodec_receive_frame结束: %d (%s)\n", receive_ret, av_err2str(receive_ret));
+                    if(DEBUG_RECORD_OPEN) {
+                        av_log(ffp, AV_LOG_INFO, "🔍 avcodec_receive_frame结束: %d (%s)\n", receive_ret, av_err2str(receive_ret));
+                    }
                 }
             } else {
-                av_log(ffp, AV_LOG_ERROR, "❌ avcodec_send_packet失败，无法解码PCM_ALAW\n");
+                if(DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_ERROR, "❌ avcodec_send_packet失败，无法解码PCM_ALAW\n");
+                }
             }
             av_frame_free(&dec_frame);
             
@@ -6911,8 +6982,10 @@ audio_normal_process:
         // 音频流使用独立的基准时间戳
         if (ffp->record_first_apts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
             ffp->record_first_apts = pkt.pts;
-            av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
                    ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+            }
         }
         
         if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
@@ -6920,6 +6993,10 @@ audio_normal_process:
             if (relative_pts < 0) relative_pts = 0;
             pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
                                        (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            if (DEBUG_RECORD_OPEN) {
+                av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
+                       ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+            }
         }
         
         if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
@@ -7017,8 +7094,10 @@ audio_normal_process:
                 double elapsed_sec = (double)(current_time - ffp->record_start_time) / 1000.0;
                 double fps = ffp->video_frame_count / elapsed_sec;
                 
-                av_log(ffp, AV_LOG_INFO, "📊 录制状态监控: 视频帧=%d, 音频帧=%d, 时长=%.1f秒, 帧率=%.1ffps\n", 
-                       ffp->video_frame_count, ffp->audio_frame_count, elapsed_sec, fps);
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "📊 录制状态监控: 视频帧=%d, 音频帧=%d, 时长=%.1f秒, 帧率=%.1ffps\n", 
+                           ffp->video_frame_count, ffp->audio_frame_count, elapsed_sec, fps);
+                }
                 
                 // 🔧 MP4完整性：报告当前时间戳状态
                 av_log(ffp, AV_LOG_INFO, "🕐 时间戳状态: 当前视频PTS=%lld (%.2f秒)\n", 
