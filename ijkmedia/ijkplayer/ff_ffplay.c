@@ -149,7 +149,7 @@
  static void free_picture(Frame *vp);
  
 // 🔧 统一调试开关：控制录制相关的详细日志输出
-#define DEBUG_RECORD_OPEN 0  // 设置为1开启调试日志，设置为0关闭
+#define DEBUG_RECORD_OPEN 1  // 设置为1开启调试日志，设置为0关闭
 
 // 录制相关函数声明
 static void fix_android15_recording_compatibility(FFPlayer *ffp);
@@ -6080,6 +6080,29 @@ static void ffp_reset_record_static_state(void);
                    ffp->m_ofmt_ctx->duration, final_duration_sec);
          }
         
+        // 🔧 【崩溃修复】在写入trailer之前，先停止接收新包
+        ffp->is_record = 0;
+        av_log(ffp, AV_LOG_INFO, "🛑 已设置录制停止标志，不再接收新包\n");
+        
+        // 🔧 【崩溃修复】释放锁，等待正在进行的写入操作完成
+        pthread_mutex_unlock(&ffp->record_mutex);
+        
+        // 根据录制时长动态调整等待时间
+        int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
+        int64_t wait_time_us = 200000; // 基础200ms
+        if (recording_duration_sec > 1800) { // 30分钟以上
+            wait_time_us = 500000; // 500ms
+        } else if (recording_duration_sec > 600) { // 10分钟以上
+            wait_time_us = 300000; // 300ms
+        }
+        
+        av_log(ffp, AV_LOG_INFO, "⏳ 等待正在进行的写入操作完成 (%lldms)...\n", wait_time_us / 1000);
+        av_usleep(wait_time_us);
+        
+        // 🔧 【崩溃修复】重新获取锁，准备写入trailer
+        pthread_mutex_lock(&ffp->record_mutex);
+        av_log(ffp, AV_LOG_INFO, "✅ 所有写入操作已完成，开始写入文件尾\n");
+        
         // 刷新所有待写入的数据包
         av_interleaved_write_frame(ffp->m_ofmt_ctx, NULL);
         
@@ -6242,55 +6265,11 @@ static void ffp_reset_record_static_state(void);
     
     pthread_mutex_unlock(&ffp->record_mutex);
     
-    // 🔧 关键修复：根据录制时长动态调整延迟时间
-    int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
-    int64_t wait_time_us = 500000; // 基础500毫秒
-    
-    // 🔧 长时间录制需要更长的等待时间
-    if (recording_duration_sec > 1800) { // 30分钟以上
-        wait_time_us = 2000000; // 2秒
-        if (DEBUG_RECORD_OPEN) {
-            av_log(ffp, AV_LOG_INFO, "🔧 检测到长时间录制(%lld秒)，延长等待时间到2秒\n", recording_duration_sec);
-        }
-    } else if (recording_duration_sec > 600) { // 10分钟以上
-        wait_time_us = 1000000; // 1秒
-        if (DEBUG_RECORD_OPEN) {
-            av_log(ffp, AV_LOG_INFO, "🔧 检测到中等时长录制(%lld秒)，延长等待时间到1秒\n", recording_duration_sec);
-        }
-    }
-    
-    if (DEBUG_RECORD_OPEN) {
-        av_log(ffp, AV_LOG_INFO, "🔧 等待异步录制操作完成... (等待时间: %lldms)\n", wait_time_us / 1000);
-    }
-    av_usleep(wait_time_us);
-    
-    // 🔧 额外的安全检查：再次确认所有状态都已重置
-    ffp->is_record = 0;
-    ffp->m_ofmt_ctx = NULL;
-    ffp->m_ofmt = NULL;
-    ffp->stream_mapping = NULL;
-    if (DEBUG_RECORD_OPEN) {
-        av_log(ffp, AV_LOG_INFO, "🔧 二次确认录制状态已重置\n");
-    }
-    
     // 🔧 重置所有静态变量
     ffp_reset_record_static_state();
     
-    // 🔧 长时间录制额外安全检查：确保所有I/O操作完成
-    if (recording_duration_sec > 600) { // 10分钟以上
-        if (DEBUG_RECORD_OPEN) {
-            av_log(ffp, AV_LOG_INFO, "🔧 长时间录制额外安全检查，再次等待I/O完成...\n");
-        }
-        av_usleep(200000); // 额外200ms等待
-        
-        // 🔧 最后一次状态确认
-        ffp->is_record = 0;
-        ffp->m_ofmt_ctx = NULL;
-        ffp->m_ofmt = NULL;
-        ffp->stream_mapping = NULL;
-        if (DEBUG_RECORD_OPEN) {
-            av_log(ffp, AV_LOG_INFO, "🔧 长时间录制最终状态确认完成\n");
-        }
+    if (DEBUG_RECORD_OPEN) {
+        av_log(ffp, AV_LOG_INFO, "🔧 录制状态已重置，准备释放资源\n");
     }
     
     // 🔧 现在安全地释放资源（在锁外进行，避免死锁）
@@ -6919,18 +6898,28 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                                                aac_pkt.pts, aac_pkt.dts, ffp->audio_frame_count, aac_frame_duration);
                                     }
                                     
-                                    // 写入AAC包
-                                    int write_ret = av_write_frame(ffp->m_ofmt_ctx, &aac_pkt);
-                                    if (write_ret >= 0) {
-                                        // 🔧 更新全局DTS追踪和音频帧计数
-                                        ffp->last_audio_dts = aac_pkt.dts;
-                                        ffp->audio_frame_count++; // 每个AAC帧递增计数
-                                        if (DEBUG_RECORD_OPEN) {
-                                            av_log(ffp, AV_LOG_INFO, "✅ AAC包写入成功, 帧#%d, DTS: %lld\n", 
-                                                   ffp->audio_frame_count, ffp->last_audio_dts);
+                                    // 🔧 【崩溃修复】加锁保护AAC包写入
+                                    if (ffp->record_mutex_initialized) {
+                                        pthread_mutex_lock(&ffp->record_mutex);
+                                        
+                                        // 在锁内再次检查录制状态
+                                        if (ffp->is_record && ffp->m_ofmt_ctx) {
+                                            // 写入AAC包
+                                            int write_ret = av_write_frame(ffp->m_ofmt_ctx, &aac_pkt);
+                                            if (write_ret >= 0) {
+                                                // 🔧 更新全局DTS追踪和音频帧计数
+                                                ffp->last_audio_dts = aac_pkt.dts;
+                                                ffp->audio_frame_count++; // 每个AAC帧递增计数
+                                                if (DEBUG_RECORD_OPEN) {
+                                                    av_log(ffp, AV_LOG_INFO, "✅ AAC包写入成功, 帧#%d, DTS: %lld\n", 
+                                                           ffp->audio_frame_count, ffp->last_audio_dts);
+                                                }
+                                            } else {
+                                                av_log(ffp, AV_LOG_ERROR, "❌ AAC包写入失败: %s\n", av_err2str(write_ret));
+                                            }
                                         }
-                                    } else {
-                                        av_log(ffp, AV_LOG_ERROR, "❌ AAC包写入失败: %s\n", av_err2str(write_ret));
+                                        
+                                        pthread_mutex_unlock(&ffp->record_mutex);
                                     }
                                     av_packet_unref(&aac_pkt);
                                 }
@@ -7033,10 +7022,28 @@ audio_normal_process:
     int64_t pts_before_write = pkt.pts;
     int64_t dts_before_write = pkt.dts;
     
+    // 🔧 【崩溃修复】关键修复：加锁保护写入操作，防止与stopRecord并发冲突
+    // 确保互斥锁已初始化
+    if (!ffp->record_mutex_initialized) {
+        av_packet_unref(&pkt);
+        return -1;
+    }
+    
+    pthread_mutex_lock(&ffp->record_mutex);
+    
+    // 🔧 【崩溃修复】在锁内再次检查录制状态，防止与stopRecord冲突
+    if (!ffp->is_record || !ffp->m_ofmt_ctx) {
+        pthread_mutex_unlock(&ffp->record_mutex);
+        av_packet_unref(&pkt);
+        return 0;
+    }
+    
     // 🔧 关键修复：使用av_write_frame避免时间戳被重置
     // av_interleaved_write_frame会重新排序和修改时间戳，导致PTS变为AV_NOPTS_VALUE
     // 使用av_write_frame保持原始时间戳不变
     int ret = av_write_frame(ffp->m_ofmt_ctx, &pkt);
+    
+    pthread_mutex_unlock(&ffp->record_mutex);
     
     // 🔍 更新帧计数器用于调试
     if (ret >= 0) {
@@ -7447,24 +7454,34 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
                              av_log(ffp, AV_LOG_INFO, "🎵 AAC编码包: size=%d, pts=%lld, dts=%lld, 帧#%d\n",
                                     aac_pkt.size, aac_pkt.pts, aac_pkt.dts, ffp->audio_frame_count);
                              
-                             // 检查AAC包是否有效
-                             if (aac_pkt.size <= 0) {
-                                 av_log(ffp, AV_LOG_WARNING, "⚠️ AAC编码包大小为0，跳过\n");
-                                 av_packet_unref(&aac_pkt);
-                                 continue;
-                             }
-                             
-                             // 🔧 使用av_write_frame而不是av_interleaved_write_frame，保持时间戳
-                             int write_ret = av_write_frame(ffp->m_ofmt_ctx, &aac_pkt);
-                             if (write_ret == 0) {
-                                 ffp->audio_frame_count++;
-                                 ffp->last_audio_dts = aac_pkt.dts;
-                                 ffp->last_record_pts = aac_pkt.pts;
-                                 ffp->last_record_dts = aac_pkt.dts;
-                                 av_log(ffp, AV_LOG_INFO, "✅ AAC帧写入成功 #%d\n", ffp->audio_frame_count);
-                             } else {
-                                 av_log(ffp, AV_LOG_ERROR, "❌ AAC帧写入失败: %s\n", av_err2str(write_ret));
-                             }
+                            // 检查AAC包是否有效
+                            if (aac_pkt.size <= 0) {
+                                av_log(ffp, AV_LOG_WARNING, "⚠️ AAC编码包大小为0，跳过\n");
+                                av_packet_unref(&aac_pkt);
+                                continue;
+                            }
+                            
+                            // 🔧 【崩溃修复】加锁保护AAC包写入
+                            if (ffp->record_mutex_initialized) {
+                                pthread_mutex_lock(&ffp->record_mutex);
+                                
+                                // 在锁内再次检查录制状态
+                                if (ffp->is_record && ffp->m_ofmt_ctx) {
+                                    // 🔧 使用av_write_frame而不是av_interleaved_write_frame，保持时间戳
+                                    int write_ret = av_write_frame(ffp->m_ofmt_ctx, &aac_pkt);
+                                    if (write_ret == 0) {
+                                        ffp->audio_frame_count++;
+                                        ffp->last_audio_dts = aac_pkt.dts;
+                                        ffp->last_record_pts = aac_pkt.pts;
+                                        ffp->last_record_dts = aac_pkt.dts;
+                                        av_log(ffp, AV_LOG_INFO, "✅ AAC帧写入成功 #%d\n", ffp->audio_frame_count);
+                                    } else {
+                                        av_log(ffp, AV_LOG_ERROR, "❌ AAC帧写入失败: %s\n", av_err2str(write_ret));
+                                    }
+                                }
+                                
+                                pthread_mutex_unlock(&ffp->record_mutex);
+                            }
                              av_packet_unref(&aac_pkt);
                          }
                      } else {
