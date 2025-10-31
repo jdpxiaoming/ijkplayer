@@ -6087,17 +6087,24 @@ static void ffp_reset_record_static_state(void);
         // 🔧 【崩溃修复】释放锁，等待正在进行的写入操作完成
         pthread_mutex_unlock(&ffp->record_mutex);
         
-        // 根据录制时长动态调整等待时间
+        // 🔧 【崩溃修复】根据录制时长动态调整等待时间（增加等待时间以确保所有写入完成）
         int64_t recording_duration_sec = (av_gettime() / 1000 - ffp->record_start_time) / 1000;
-        int64_t wait_time_us = 200000; // 基础200ms
+        int64_t wait_time_us = 300000; // 基础300ms（增加到300ms）
         if (recording_duration_sec > 1800) { // 30分钟以上
-            wait_time_us = 500000; // 500ms
+            wait_time_us = 1000000; // 1秒
         } else if (recording_duration_sec > 600) { // 10分钟以上
-            wait_time_us = 300000; // 300ms
+            wait_time_us = 700000; // 700ms
+        } else if (recording_duration_sec > 300) { // 5分钟以上
+            wait_time_us = 500000; // 500ms
         }
         
-        av_log(ffp, AV_LOG_INFO, "⏳ 等待正在进行的写入操作完成 (%lldms)...\n", wait_time_us / 1000);
+        av_log(ffp, AV_LOG_INFO, "⏳ 等待正在进行的写入操作完成 (等待%lldms，录制时长%lld秒)...\n", 
+               wait_time_us / 1000, recording_duration_sec);
         av_usleep(wait_time_us);
+        
+        // 🔧 【崩溃修复】等待后再次确认没有新的写入操作
+        av_log(ffp, AV_LOG_INFO, "⏳ 第一次等待完成，再次检查并短暂等待...\n");
+        av_usleep(100000); // 额外等待100ms
         
         // 🔧 【崩溃修复】重新获取锁，准备写入trailer
         pthread_mutex_lock(&ffp->record_mutex);
@@ -6500,16 +6507,18 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         return 0;
     }
     
-    // 🔧 多重检查录制状态
+    // 🔧 【崩溃修复】最优先检查：如果录制已停止，立即返回，不做任何处理
     if (!ffp->is_record) {
-        return 0; // 录制已停止
+        return 0; // 录制已停止，直接返回
     }
     
+    // 🔧 检查资源是否已释放
     if (!ffp->m_ofmt_ctx || !ffp->stream_mapping) {
         return 0; // 资源已释放，静默返回
     }
     
-    // 🔧 再次检查录制状态，防止竞态条件
+    // 🔧 【崩溃修复】再次检查录制状态，防止竞态条件
+    // 在任何复杂操作之前，最后一次确认录制状态
     if (!ffp->is_record) {
         return 0;
     }
@@ -6528,7 +6537,13 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         }
     }
     
+    // 🔧 【崩溃修复】如果有录制错误且录制已停止，不要尝试恢复
     if (ffp->record_error) {
+        if (!ffp->is_record) {
+            // 录制已停止，不要恢复
+            return 0;
+        }
+        
         int64_t current_time = av_gettime() / 1000; // 毫秒
         
         // 如果距离上次错误超过5秒，重置错误计数
@@ -6722,6 +6737,12 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
         }
         
         if (should_transcode) {
+            // 🔧 【崩溃修复】在转码前再次检查录制状态
+            if (!ffp->is_record || !ffp->m_ofmt_ctx) {
+                av_packet_unref(&pkt);
+                return 0;
+            }
+            
             if (DEBUG_RECORD_OPEN) {
                 av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支: codec_id=%d(%s)\n", 
                    in_stream->codecpar->codec_id, avcodec_get_name(in_stream->codecpar->codec_id));
@@ -7358,6 +7379,12 @@ static void ffp_record_file_async(FFPlayer *ffp, AVPacket *packet) {
                 (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW));
          
         if (ffp->enable_pcm_to_aac_transcode && (in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_MULAW || in_stream->codecpar->codec_id == AV_CODEC_ID_PCM_ALAW)) {
+            // 🔧 【崩溃修复】在转码前再次检查录制状态
+            if (!ffp->is_record || !ffp->m_ofmt_ctx) {
+                pthread_mutex_unlock(&ffp->record_mutex);
+                return 0;
+            }
+            
             av_log(ffp, AV_LOG_INFO, "🎯 进入PCM_ALAW转AAC分支\n");
             AVFrame *dec_frame = av_frame_alloc();
             if (!dec_frame) { ret = AVERROR(ENOMEM); goto audio_copy_fallback; }
