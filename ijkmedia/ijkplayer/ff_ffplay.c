@@ -149,7 +149,7 @@
  static void free_picture(Frame *vp);
  
 // 🔧 统一调试开关：控制录制相关的详细日志输出
-#define DEBUG_RECORD_OPEN 1  // 设置为1开启调试日志，设置为0关闭
+#define DEBUG_RECORD_OPEN 0  // 设置为1开启调试日志，设置为0关闭
 
 // 录制相关函数声明
 static void fix_android15_recording_compatibility(FFPlayer *ffp);
