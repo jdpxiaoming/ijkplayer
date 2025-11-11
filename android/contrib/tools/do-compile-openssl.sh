@@ -158,6 +158,12 @@ export PATH=$FF_TOOLCHAIN_PATH/bin:$PATH
 
 export COMMON_FF_CFG_FLAGS=
 
+# Support 16KB page size for OpenSSL
+if [ "$IJK_PAGE_SIZE" = "16384" ]; then
+    export LDFLAGS="-Wl,-z,max-page-size=16384"
+    echo "Adding 16KB page size support for openssl"
+fi
+
 FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
 
 #--------------------

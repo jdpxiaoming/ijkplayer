@@ -226,6 +226,12 @@ FF_CFLAGS="-O3 -Wall -pipe \
     -Wno-psabi -Wa,--noexecstack \
     -DANDROID -DNDEBUG"
 
+# Support 16KB page size
+if [ "$IJK_PAGE_SIZE" = "16384" ]; then
+    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384"
+    echo "Adding 16KB page size support for ffmpeg"
+fi
+
 # cause av_strlcpy crash with gcc4.7, gcc4.8
 # -fmodulo-sched -fmodulo-sched-allow-regmoves
 
@@ -346,7 +352,13 @@ do
     done
 done
 
-$CC -lm -lz -shared --sysroot=$FF_SYSROOT -Wl,--no-undefined -Wl,-z,noexecstack $FF_EXTRA_LDFLAGS \
+# Add page size flag for 16KB support
+FF_LINKER_FLAGS="-Wl,--no-undefined -Wl,-z,noexecstack"
+if [ "$IJK_PAGE_SIZE" = "16384" ]; then
+    FF_LINKER_FLAGS="$FF_LINKER_FLAGS -Wl,-z,max-page-size=16384"
+fi
+
+$CC -lm -lz -shared --sysroot=$FF_SYSROOT $FF_LINKER_FLAGS $FF_EXTRA_LDFLAGS \
     -Wl,-soname,libijkwdzffmpeg.so \
     $FF_C_OBJ_FILES \
     $FF_ASM_OBJ_FILES \

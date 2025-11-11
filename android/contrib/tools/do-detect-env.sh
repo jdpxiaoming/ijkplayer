@@ -42,6 +42,9 @@ export IJK_GCC_VER=4.9
 export IJK_GCC_64_VER=4.9
 export IJK_MAKE_TOOLCHAIN_FLAGS=
 export IJK_MAKE_FLAG=
+# Support 16KB page size (default is 4KB, set IJK_PAGE_SIZE=16384 for 16KB)
+# Can be overridden by setting IJK_PAGE_SIZE environment variable
+export IJK_PAGE_SIZE=${IJK_PAGE_SIZE:-4096}
 export IJK_NDK_REL=$(grep -o '^r[0-9]*.*' $ANDROID_NDK/RELEASE.TXT 2>/dev/null | sed 's/[[:space:]]*//g' | cut -b2-)
 case "$IJK_NDK_REL" in
     10e*)
@@ -97,3 +100,12 @@ case "$UNAME_S" in
         echo "Cygwin temp prefix=$IJK_WIN_TEMP/"
     ;;
 esac
+
+# Add page size flag to toolchain flags if page size is set to 16KB
+# Note: --page-size flag may not be supported in all NDK versions
+# The actual page size support is mainly handled via linker flags
+if [ "$IJK_PAGE_SIZE" = "16384" ]; then
+    # Try to add --page-size flag (may not be supported in older NDK versions)
+    export IJK_MAKE_TOOLCHAIN_FLAGS="$IJK_MAKE_TOOLCHAIN_FLAGS --page-size=16384"
+    echo "Using 16KB page size for toolchain"
+fi
