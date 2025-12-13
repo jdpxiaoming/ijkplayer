@@ -1942,7 +1942,7 @@ static void ffp_reset_record_static_state(void);
          fabsf(ffp->pf_playback_rate - 1.0f) > 0.00001) {
          char setpts_buf[256];
          float rate = 1.0f / ffp->pf_playback_rate;
-         rate = av_clipf_c(rate, 0.5f, 2.0f);
+         rate = av_clipf_c(rate, 0.5f, 16.0f);
          av_log(ffp, AV_LOG_INFO, "vf_rate=%f(1/%f)\n", ffp->pf_playback_rate, rate);
          snprintf(setpts_buf, sizeof(setpts_buf), "%f*PTS", rate);
          INSERT_FILT("setpts", setpts_buf);
