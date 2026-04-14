@@ -27,17 +27,18 @@
 
 #include <stdbool.h>
 #include <assert.h>
-#include "libavutil/avstring.h"
-#include "libavutil/time.h"
-#include "libavformat/avformat.h"
-#include "libavcodec/avfft.h"
-#include "libswscale/swscale.h"
-#include "libavutil/application.h"
-#include "libavutil/base64.h"
-#include "libavutil/error.h"
-#include "libavutil/opt.h"
-#include "libavutil/version.h"
-#include "libswresample/swresample.h"
+#include <libavutil/avstring.h>
+#include <libavutil/time.h>
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavcodec/avfft.h>
+#include <libswscale/swscale.h>
+#include <libavutil/application.h>
+#include <libavutil/base64.h>
+#include <libavutil/error.h>
+#include <libavutil/opt.h>
+#include <libavutil/version.h>
+#include <libswresample/swresample.h>
 
 #include "ijksdl/ijksdl.h"
 
