@@ -3314,6 +3314,8 @@ static void ffp_reset_record_static_state(void);
      int video_stream_count = 0;
      int h264_stream_count = 0;
      int first_h264_stream = -1;
+     int hevc_stream_count = 0;
+     int first_hevc_stream = -1;
      for (i = 0; i < ic->nb_streams; i++) {
          AVStream *st = ic->streams[i];
          enum AVMediaType type = st->codecpar->codec_type;
@@ -3331,12 +3333,21 @@ static void ffp_reset_record_static_state(void);
                  h264_stream_count++;
                  if (first_h264_stream < 0)
                      first_h264_stream = i;
+             } else if (codec_id == AV_CODEC_ID_HEVC) {
+                 hevc_stream_count++;
+                 if (first_hevc_stream < 0)
+                     first_hevc_stream = i;
              }
          }
      }
      if (video_stream_count > 1 && st_index[AVMEDIA_TYPE_VIDEO] < 0) {
-         st_index[AVMEDIA_TYPE_VIDEO] = first_h264_stream;
-         av_log(NULL, AV_LOG_WARNING, "multiple video stream found, prefer first h264 stream: %d\n", first_h264_stream);
+         if (hevc_stream_count > 0) {
+             st_index[AVMEDIA_TYPE_VIDEO] = first_hevc_stream;
+             av_log(NULL, AV_LOG_INFO, "multiple video stream found, prefer first HEVC stream: %d\n", first_hevc_stream);
+         } else {
+             st_index[AVMEDIA_TYPE_VIDEO] = first_h264_stream;
+             av_log(NULL, AV_LOG_WARNING, "multiple video stream found, prefer first h264 stream: %d\n", first_h264_stream);
+         }
      }
      if (!ffp->video_disable)
          st_index[AVMEDIA_TYPE_VIDEO] =
