@@ -36,6 +36,10 @@ function pull_fork()
     sh $TOOLS/pull-repo-ref.sh $IJK_FFMPEG_FORK android/contrib/ffmpeg-$1 ${IJK_FFMPEG_LOCAL_REPO}
     cd android/contrib/ffmpeg-$1
     git checkout ${IJK_FFMPEG_COMMIT} -B ijkplayer
+    if [ -f "../../ffmpeg-let-rtmp-flv-support-hevc-h265-opus-clean.patch" ]; then
+        echo "== patch ffmpeg-$1 =="
+        patch -p1 < ../../ffmpeg-let-rtmp-flv-support-hevc-h265-opus-clean.patch
+    fi
     cd -
 }
 
