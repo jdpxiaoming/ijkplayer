@@ -89,14 +89,7 @@
  
  #define CODEC_FLAG_GLOBAL_HEADER AV_CODEC_FLAG_GLOBAL_HEADER
  
- // FIXME: 9 work around NDKr8e or gcc4.7 bug
- // isnan() may not recognize some double NAN, so we test both double and float
- #if defined(__ANDROID__)
- #ifdef isnan
- #undef isnan
- #endif
- #define isnan(x) (isnan((double)(x)) || isnanf((float)(x)))
- #endif
+ // isnan() workaround removed for modern NDK compatibility
  
  
  #if defined(__ANDROID__)

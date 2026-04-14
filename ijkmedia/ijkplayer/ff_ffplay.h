@@ -75,6 +75,7 @@ int       ffp_get_loop(FFPlayer *ffp);
 /* for internal usage */
 int       ffp_packet_queue_init(PacketQueue *q);
 void      ffp_packet_queue_destroy(PacketQueue *q);
+void      packet_queue_destroy(PacketQueue *q);
 void      ffp_packet_queue_abort(PacketQueue *q);
 void      ffp_packet_queue_start(PacketQueue *q);
 void      ffp_packet_queue_flush(PacketQueue *q);
@@ -117,6 +118,8 @@ void      ffp_set_property_int64(FFPlayer *ffp, int id, int64_t value);
 // record video to mp4 add by jdpxiaoming 2024/07/27.
 int       ffp_start_record(FFPlayer *ffp, const char *file_name);
 int       ffp_stop_record(FFPlayer *ffp);
+int       ffp_start_record_transcode(FFPlayer *ffp, const char *file_name);
+int       ffp_ffmpeg_h265_reencode(const char *input_path, const char *output_path);
 int       ffp_record_file(FFPlayer *ffp, AVPacket *packet);
 void      ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf);
 // must be freed with free();

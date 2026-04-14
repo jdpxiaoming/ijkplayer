@@ -22,6 +22,7 @@
 #ifndef __APPLE__
 
 #include "ijksdl_egl.h"
+#include <android/native_window.h>
 
 #include <stdlib.h>
 #include <stdbool.h>

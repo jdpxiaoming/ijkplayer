@@ -111,9 +111,13 @@ echo "--------------------"
 echo "[*] check x264 env"
 echo "--------------------"
 
-export CC=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
-export AR=$FF_TOOLCHAIN_BIN/llvm-ar
-export NM=$FF_TOOLCHAIN_BIN/llvm-nm
+export PATH=$FF_TOOLCHAIN_BIN:$PATH
+
+export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+export AR=llvm-ar
+export NM=llvm-nm
+export STRINGS=llvm-strings
+export RANLIB=llvm-ranlib
 
 export COMMON_FF_CFG_FLAGS=
 
@@ -127,10 +131,11 @@ FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
 # Standard options:
 echo "FF_PREFIX = $FF_PREFIX"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --prefix=$FF_PREFIX"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-static --disable-shared"
+FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-static"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-pic --enable-strip --disable-asm --disable-cli"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME-"
+FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=llvm-"
 FF_CFG_FLAGS="$FF_CFG_FLAGS $FF_PLATFORM_CFG_FLAGS"
+
 
 #--------------------
 echo ""

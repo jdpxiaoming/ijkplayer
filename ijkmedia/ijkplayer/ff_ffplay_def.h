@@ -23,6 +23,9 @@
 #ifndef FFPLAY__FF_FFPLAY_DEF_H
 #define FFPLAY__FF_FFPLAY_DEF_H
 
+struct PacketQueue;
+void packet_queue_destroy(struct PacketQueue *q);
+
 /**
  * @file
  * simple media player based on the FFmpeg libraries

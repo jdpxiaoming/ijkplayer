@@ -53,6 +53,9 @@ FF_DEP_OPENSSL_LIB=
 FF_DEP_LIBSOXR_INC=
 FF_DEP_LIBSOXR_LIB=
 
+FF_DEP_X264_INC=
+FF_DEP_X264_LIB=
+
 FF_CFG_FLAGS=
 
 FF_EXTRA_CFLAGS=
@@ -77,6 +80,7 @@ if [ "$FF_ARCH" = "armv7a" ]; then
     FF_BUILD_NAME=ffmpeg-armv7a
     FF_BUILD_NAME_OPENSSL=openssl-armv7a
     FF_BUILD_NAME_LIBSOXR=libsoxr-armv7a
+    FF_BUILD_NAME_X264=x264-armv7a
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=armv7a-linux-androideabi
@@ -95,6 +99,7 @@ elif [ "$FF_ARCH" = "x86" ]; then
     FF_BUILD_NAME=ffmpeg-x86
     FF_BUILD_NAME_OPENSSL=openssl-x86
     FF_BUILD_NAME_LIBSOXR=libsoxr-x86
+    FF_BUILD_NAME_X264=x264-x86
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=i686-linux-android
@@ -111,6 +116,7 @@ elif [ "$FF_ARCH" = "x86_64" ]; then
     FF_BUILD_NAME=ffmpeg-x86_64
     FF_BUILD_NAME_OPENSSL=openssl-x86_64
     FF_BUILD_NAME_LIBSOXR=libsoxr-x86_64
+    FF_BUILD_NAME_X264=x264-x86_64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=x86_64-linux-android
@@ -127,6 +133,7 @@ elif [ "$FF_ARCH" = "arm64" ]; then
     FF_BUILD_NAME=ffmpeg-arm64
     FF_BUILD_NAME_OPENSSL=openssl-arm64
     FF_BUILD_NAME_LIBSOXR=libsoxr-arm64
+    FF_BUILD_NAME_X264=x264-arm64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=aarch64-linux-android
@@ -163,6 +170,9 @@ FF_DEP_OPENSSL_LIB=$FF_BUILD_ROOT/build/$FF_BUILD_NAME_OPENSSL/output/lib
 FF_DEP_LIBSOXR_INC=$FF_BUILD_ROOT/build/$FF_BUILD_NAME_LIBSOXR/output/include
 FF_DEP_LIBSOXR_LIB=$FF_BUILD_ROOT/build/$FF_BUILD_NAME_LIBSOXR/output/lib
 
+FF_DEP_X264_INC=$FF_BUILD_ROOT/build/$FF_BUILD_NAME_X264/output/include
+FF_DEP_X264_LIB=$FF_BUILD_ROOT/build/$FF_BUILD_NAME_X264/output/lib
+
 mkdir -p $FF_PREFIX
 
 #--------------------
@@ -171,27 +181,34 @@ echo "--------------------"
 echo "[*] check ffmpeg env"
 echo "--------------------"
 
+export PATH=$FF_TOOLCHAIN_BIN:$PATH
+
 # NDK Clang wrappers
-export CC=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
-export CXX=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang++
+export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+export CXX=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang++
 export AS=$CC
-export AR=$FF_TOOLCHAIN_BIN/llvm-ar
-export LD=$FF_TOOLCHAIN_BIN/ld.lld
-export STRIP=$FF_TOOLCHAIN_BIN/llvm-strip
-export NM=$FF_TOOLCHAIN_BIN/llvm-nm
+export AR=llvm-ar
+export LD=ld.lld
+export STRIP=llvm-strip
+export NM=llvm-nm
 
 FF_CFLAGS="-O3 -Wall -pipe \
     -std=c99 \
     -ffast-math \
+    -fPIC \
     -fstrict-aliasing -Werror=strict-aliasing \
     -Wa,--noexecstack \
+    -Wno-incompatible-function-pointer-types \
     -DANDROID -DNDEBUG"
 
 # Support 16KB page size
 if [ "$IJK_PAGE_SIZE" = "16384" ]; then
-    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384"
+    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-Bsymbolic"
     echo "Adding 16KB page size support for ffmpeg"
+else
+    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-Bsymbolic"
 fi
+
 
 export COMMON_FF_CFG_FLAGS=
 . $FF_BUILD_ROOT/../../config/module.sh
@@ -212,7 +229,15 @@ if [ -f "${FF_DEP_LIBSOXR_LIB}/libsoxr.a" ]; then
     FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-libsoxr"
 
     FF_CFLAGS="$FF_CFLAGS -I${FF_DEP_LIBSOXR_INC}"
-    FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_LIBSOXR_LIB} -lsoxr"
+    FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_LIBSOXR_LIB} -lsoxr -lm"
+fi
+
+if [ -f "${FF_DEP_X264_LIB}/libx264.a" ]; then
+    echo "x264 detected"
+    FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-libx264 --enable-gpl"
+
+    FF_CFLAGS="$FF_CFLAGS -I${FF_DEP_X264_INC}"
+    FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_X264_LIB} -lx264"
 fi
 
 FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
@@ -222,7 +247,8 @@ FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --prefix=$FF_PREFIX"
 
 # Advanced options (experts only):
-FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME-"
+FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=llvm-"
+FF_CFG_FLAGS="$FF_CFG_FLAGS --ranlib=llvm-ranlib"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-cross-compile"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --target-os=android"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-pic"
@@ -263,6 +289,7 @@ else
         --nm=$NM \
         --ar=$AR \
         --as=$AS \
+        --ranlib=$RANLIB \
         --extra-cflags="$FF_CFLAGS $FF_EXTRA_CFLAGS" \
         --extra-ldflags="$FF_DEP_LIBS $FF_EXTRA_LDFLAGS"
     make clean

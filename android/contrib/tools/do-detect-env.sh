@@ -44,6 +44,12 @@ export IJK_MAKE_FLAG=
 # Can be overridden by setting IJK_PAGE_SIZE environment variable
 export IJK_PAGE_SIZE=${IJK_PAGE_SIZE:-16384}
 
+# try to detect cmake
+export IJK_CMAKE=$(ls -d $HOME/Library/Android/sdk/cmake/*/bin/cmake 2>/dev/null | tail -n 1)
+if [ -n "$IJK_CMAKE" ]; then
+    export PATH=$(dirname $IJK_CMAKE):$PATH
+fi
+
 # Detect Host OS and Arch
 case "$UNAME_S" in
     Darwin)

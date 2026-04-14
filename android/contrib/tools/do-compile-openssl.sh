@@ -67,7 +67,7 @@ if [ "$FF_ARCH" = "armv7a" ]; then
 	
     FF_CROSS_PREFIX=armv7a-linux-androideabi
     FF_TOOLCHAIN_NAME=armv7a-linux-androideabi
-    FF_PLATFORM_CFG_FLAGS="android-arm"
+    FF_PLATFORM_CFG_FLAGS="linux-armv4 -marm no-asm"
 
 elif [ "$FF_ARCH" = "x86" ]; then
     FF_BUILD_NAME=openssl-x86
@@ -84,7 +84,7 @@ elif [ "$FF_ARCH" = "x86_64" ]; then
 
     FF_CROSS_PREFIX=x86_64-linux-android
     FF_TOOLCHAIN_NAME=x86_64-linux-android
-    FF_PLATFORM_CFG_FLAGS="android-x86_64"
+    FF_PLATFORM_CFG_FLAGS="linux-x86_64"
 
 elif [ "$FF_ARCH" = "arm64" ]; then
     FF_BUILD_NAME=openssl-arm64
@@ -92,7 +92,9 @@ elif [ "$FF_ARCH" = "arm64" ]; then
 
     FF_CROSS_PREFIX=aarch64-linux-android
     FF_TOOLCHAIN_NAME=aarch64-linux-android
-    FF_PLATFORM_CFG_FLAGS="android-arm64"
+    FF_PLATFORM_CFG_FLAGS="linux-aarch64"
+
+
 
 else
     echo "unknown architecture $FF_ARCH";
@@ -111,11 +113,12 @@ echo ""
 echo "--------------------"
 echo "[*] check openssl env"
 echo "--------------------"
+export PATH=$FF_TOOLCHAIN_BIN:$PATH
 
-export CC=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
-export AR=$FF_TOOLCHAIN_BIN/llvm-ar
-export NM=$FF_TOOLCHAIN_BIN/llvm-nm
-export RANLIB=$FF_TOOLCHAIN_BIN/llvm-ranlib
+export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+export AR=llvm-ar
+export NM=llvm-nm
+export RANLIB=llvm-ranlib
 
 export COMMON_FF_CFG_FLAGS=
 
@@ -129,9 +132,11 @@ FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
 # Standard options:
 FF_CFG_FLAGS="$FF_CFG_FLAGS zlib-dynamic"
 FF_CFG_FLAGS="$FF_CFG_FLAGS no-shared"
+FF_CFG_FLAGS="$FF_CFG_FLAGS -fPIC"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --openssldir=$FF_PREFIX"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-compile-prefix=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME-"
+# FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-compile-prefix=$FF_TOOLCHAIN_NAME-"
 FF_CFG_FLAGS="$FF_CFG_FLAGS $FF_PLATFORM_CFG_FLAGS"
+
 
 #--------------------
 echo ""
@@ -147,7 +152,7 @@ echo ""
 echo "--------------------"
 echo "[*] compile openssl"
 echo "--------------------"
-make depend
+# make depend
 make $FF_MAKE_FLAGS
 make install_sw
 
