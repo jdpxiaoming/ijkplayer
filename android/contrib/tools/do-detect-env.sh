@@ -38,74 +38,58 @@ fi
 
 
 # try to detect NDK version
-export IJK_GCC_VER=4.9
-export IJK_GCC_64_VER=4.9
 export IJK_MAKE_TOOLCHAIN_FLAGS=
 export IJK_MAKE_FLAG=
-# Support 16KB page size (default is 4KB, set IJK_PAGE_SIZE=16384 for 16KB)
+# Support 16KB page size (Default is 16384 for Android 15+ compatibility)
 # Can be overridden by setting IJK_PAGE_SIZE environment variable
-export IJK_PAGE_SIZE=${IJK_PAGE_SIZE:-4096}
-export IJK_NDK_REL=$(grep -o '^r[0-9]*.*' $ANDROID_NDK/RELEASE.TXT 2>/dev/null | sed 's/[[:space:]]*//g' | cut -b2-)
-case "$IJK_NDK_REL" in
-    10e*)
-        # we don't use 4.4.3 because it doesn't handle threads correctly.
-        if test -d ${ANDROID_NDK}/toolchains/arm-linux-androideabi-4.8
-        # if gcc 4.8 is present, it's there for all the archs (x86, mips, arm)
-        then
-            echo "NDKr$IJK_NDK_REL detected"
+export IJK_PAGE_SIZE=${IJK_PAGE_SIZE:-16384}
 
-            case "$UNAME_S" in
-                Darwin)
-                    export IJK_MAKE_TOOLCHAIN_FLAGS="$IJK_MAKE_TOOLCHAIN_FLAGS --system=darwin-x86_64"
-                ;;
-                CYGWIN_NT-*)
-                    export IJK_MAKE_TOOLCHAIN_FLAGS="$IJK_MAKE_TOOLCHAIN_FLAGS --system=windows-x86_64"
-                ;;
-            esac
-        else
-            echo "You need the NDKr10e or later"
-            exit 1
-        fi
-    ;;
-    *)
-        IJK_NDK_REL=$(grep -o '^Pkg\.Revision.*=[0-9]*.*' $ANDROID_NDK/source.properties 2>/dev/null | sed 's/[[:space:]]*//g' | cut -d "=" -f 2)
-        echo "IJK_NDK_REL=$IJK_NDK_REL"
-        case "$IJK_NDK_REL" in
-            11*|12*|13*|14*)
-                if test -d ${ANDROID_NDK}/toolchains/arm-linux-androideabi-4.9
-                then
-                    echo "NDKr$IJK_NDK_REL detected"
-                else
-                    echo "You need the NDKr10e or later"
-                    exit 1
-                fi
-            ;;
-            *)
-                echo "You need the NDKr10e or later"
-                exit 1
-            ;;
-        esac
-    ;;
-esac
-
-
+# Detect Host OS and Arch
 case "$UNAME_S" in
     Darwin)
         export IJK_MAKE_FLAG=-j`sysctl -n machdep.cpu.thread_count`
+        case "$(uname -m)" in
+            arm64)
+                export IJK_NDK_HOST_TAG="darwin-arm64"
+                ;;
+            *)
+                export IJK_NDK_HOST_TAG="darwin-x86_64"
+                ;;
+        esac
+        # Fallback for older NDKs that don't have darwin-arm64 folder
+        if [ ! -d "$ANDROID_NDK/toolchains/llvm/prebuilt/$IJK_NDK_HOST_TAG" ]; then
+            export IJK_NDK_HOST_TAG="darwin-x86_64"
+        fi
+    ;;
+    Linux)
+        export IJK_MAKE_FLAG=-j$(nproc)
+        export IJK_NDK_HOST_TAG="linux-x86_64"
     ;;
     CYGWIN_NT-*)
         IJK_WIN_TEMP="$(cygpath -am /tmp)"
         export TEMPDIR=$IJK_WIN_TEMP/
-
+        export IJK_NDK_HOST_TAG="windows-x86_64"
         echo "Cygwin temp prefix=$IJK_WIN_TEMP/"
     ;;
 esac
 
+export IJK_NDK_REL=$(grep -o '^Pkg\.Revision.*=[0-9]*.*' $ANDROID_NDK/source.properties 2>/dev/null | sed 's/[[:space:]]*//g' | cut -d "=" -f 2)
+echo "IJK_NDK_REL=$IJK_NDK_REL"
+
+case "$IJK_NDK_REL" in
+    2[0-9]*)
+        echo "NDKr$IJK_NDK_REL detected"
+    ;;
+    *)
+        echo "You need the NDKr20 or later for this modernized build script."
+        echo "Detected NDK version: $IJK_NDK_REL"
+        exit 1
+    ;;
+esac
+
 # Add page size flag to toolchain flags if page size is set to 16KB
-# Note: --page-size flag may not be supported in all NDK versions
-# The actual page size support is mainly handled via linker flags
 if [ "$IJK_PAGE_SIZE" = "16384" ]; then
-    # Try to add --page-size flag (may not be supported in older NDK versions)
     export IJK_MAKE_TOOLCHAIN_FLAGS="$IJK_MAKE_TOOLCHAIN_FLAGS --page-size=16384"
     echo "Using 16KB page size for toolchain"
 fi
+

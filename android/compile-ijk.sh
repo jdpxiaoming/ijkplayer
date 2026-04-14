@@ -24,10 +24,9 @@ fi
 
 REQUEST_TARGET=$1
 REQUEST_SUB_CMD=$2
-ACT_ABI_32="armv5 armv7a x86"
-# ACT_ABI_64="armv5 armv7a arm64 x86 x86_64"
-ACT_ABI_64="armv7a arm64"
-ACT_ABI_ALL=$ACT_ABI_64
+ACT_ABI_32="armv7a x86"
+ACT_ABI_64="arm64 x86_64"
+ACT_ABI_ALL="armv7a arm64 x86 x86_64"
 UNAME_S=$(uname -s)
 
 FF_MAKEFLAGS=
@@ -74,14 +73,15 @@ do_ndk_build () {
     PARAM_TARGET=$1
     PARAM_SUB_CMD=$2
     case "$PARAM_TARGET" in
-        armv5|armv7a)
+        armv7a|arm64|x86|x86_64)
             cd "ijkplayer/ijkplayer-$PARAM_TARGET/src/main/jni"
-            do_sub_cmd $PARAM_SUB_CMD
-            cd -
-        ;;
-        arm64|x86|x86_64)
-            cd "ijkplayer/ijkplayer-$PARAM_TARGET/src/main/jni"
-            if [ "$PARAM_SUB_CMD" = 'prof' ]; then PARAM_SUB_CMD=''; fi
+            if [ "$PARAM_SUB_CMD" = 'prof' ]; then 
+                if [ "$PARAM_TARGET" = "armv7a" ]; then
+                    : # prof supported
+                else
+                    PARAM_SUB_CMD=''
+                fi
+            fi
             do_sub_cmd $PARAM_SUB_CMD
             cd -
         ;;
@@ -93,7 +93,7 @@ case "$REQUEST_TARGET" in
     "")
         do_ndk_build armv7a;
     ;;
-    armv5|armv7a|arm64|x86|x86_64)
+    armv7a|arm64|x86|x86_64)
         do_ndk_build $REQUEST_TARGET $REQUEST_SUB_CMD;
     ;;
     all32)
@@ -102,8 +102,14 @@ case "$REQUEST_TARGET" in
             do_ndk_build "$ABI" $REQUEST_SUB_CMD;
         done
     ;;
-    all|all64)
+    all64)
         for ABI in $ACT_ABI_64
+        do
+            do_ndk_build "$ABI" $REQUEST_SUB_CMD;
+        done
+    ;;
+    all)
+        for ABI in $ACT_ABI_ALL
         do
             do_ndk_build "$ABI" $REQUEST_SUB_CMD;
         done
@@ -116,10 +122,10 @@ case "$REQUEST_TARGET" in
     ;;
     *)
         echo "Usage:"
-        echo "  compile-ijk.sh armv5|armv7a|arm64|x86|x86_64"
-        echo "  compile-ijk.sh all|all32"
-        echo "  compile-ijk.sh all64"
+        echo "  compile-ijk.sh armv7a|arm64|x86|x86_64"
+        echo "  compile-ijk.sh all|all32|all64"
         echo "  compile-ijk.sh clean"
     ;;
 esac
+
 

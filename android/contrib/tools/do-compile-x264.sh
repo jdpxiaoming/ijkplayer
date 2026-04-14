@@ -35,12 +35,13 @@ fi
 
 
 FF_BUILD_ROOT=`pwd`
-FF_ANDROID_PLATFORM=android-9
+FF_ANDROID_PLATFORM=21
 
 
 FF_BUILD_NAME=
 FF_SOURCE=
 FF_CROSS_PREFIX=
+FF_TOOLCHAIN_NAME=
 
 FF_CFG_FLAGS=
 FF_PLATFORM_CFG_FLAGS=
@@ -53,104 +54,55 @@ FF_EXTRA_LDFLAGS=
 #--------------------
 echo ""
 echo "--------------------"
-echo "[*] make NDK standalone toolchain"
+echo "[*] check environment"
 echo "--------------------"
 . ./tools/do-detect-env.sh
-FF_MAKE_TOOLCHAIN_FLAGS=$IJK_MAKE_TOOLCHAIN_FLAGS
 FF_MAKE_FLAGS=$IJK_MAKE_FLAG
-FF_GCC_VER=$IJK_GCC_VER
-FF_GCC_64_VER=$IJK_GCC_64_VER
 
 
 #----- armv7a begin -----
 if [ "$FF_ARCH" = "armv7a" ]; then
-        echo "gdebug x264-armv7a.............."
     FF_BUILD_NAME=x264-armv7a
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
-    FF_CROSS_PREFIX=arm-linux-androideabi
-    FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_VER}
-
-    FF_PLATFORM_CFG_FLAGS="android-armv7"
-
-elif [ "$FF_ARCH" = "armv5" ]; then
-    FF_BUILD_NAME=x264-armv5
-    FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
-
-    FF_CROSS_PREFIX=arm-linux-androideabi
-        FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_VER}
-
-    FF_PLATFORM_CFG_FLAGS="android"
+    FF_CROSS_PREFIX=armv7a-linux-androideabi
+    FF_TOOLCHAIN_NAME=armv7a-linux-androideabi
+    FF_PLATFORM_CFG_FLAGS="--host=arm-linux"
 
 elif [ "$FF_ARCH" = "x86" ]; then
     FF_BUILD_NAME=x264-x86
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=i686-linux-android
-        FF_TOOLCHAIN_NAME=x86-${FF_GCC_VER}
-
-    FF_PLATFORM_CFG_FLAGS="android-x86"
+    FF_TOOLCHAIN_NAME=i686-linux-android
+    FF_PLATFORM_CFG_FLAGS="--host=i686-linux"
 
 elif [ "$FF_ARCH" = "x86_64" ]; then
-    FF_ANDROID_PLATFORM=android-21
-
     FF_BUILD_NAME=x264-x86_64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=x86_64-linux-android
-    FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_64_VER}
-
-    FF_PLATFORM_CFG_FLAGS="linux-x86_64"
+    FF_TOOLCHAIN_NAME=x86_64-linux-android
+    FF_PLATFORM_CFG_FLAGS="--host=x86_64-linux"
 
 elif [ "$FF_ARCH" = "arm64" ]; then
-    FF_ANDROID_PLATFORM=android-21
-
     FF_BUILD_NAME=x264-arm64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CROSS_PREFIX=aarch64-linux-android
-    FF_TOOLCHAIN_NAME=${FF_CROSS_PREFIX}-${FF_GCC_64_VER}
-
-    FF_PLATFORM_CFG_FLAGS="linux-aarch64"
+    FF_TOOLCHAIN_NAME=aarch64-linux-android
+    FF_PLATFORM_CFG_FLAGS="--host=aarch64-linux"
 
 else
     echo "unknown architecture $FF_ARCH";
     exit 1
 fi
 
-FF_TOOLCHAIN_PATH=$FF_BUILD_ROOT/build/$FF_BUILD_NAME/toolchain
-
-FF_SYSROOT=$FF_TOOLCHAIN_PATH/sysroot
+FF_TOOLCHAIN_PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/$IJK_NDK_HOST_TAG
+FF_TOOLCHAIN_BIN=$FF_TOOLCHAIN_PATH/bin
 FF_PREFIX=$FF_BUILD_ROOT/build/$FF_BUILD_NAME/output
 
 mkdir -p $FF_PREFIX
-# mkdir -p $FF_SYSROOT
-
-
-#--------------------
-echo ""
-echo "--------------------"
-echo "[*] make NDK standalone toolchain"
-echo "--------------------"
-. ./tools/do-detect-env.sh
-FF_MAKE_TOOLCHAIN_FLAGS=$IJK_MAKE_TOOLCHAIN_FLAGS
-FF_MAKE_FLAGS=$IJK_MAKE_FLAG
-
-
-FF_MAKE_TOOLCHAIN_FLAGS="$FF_MAKE_TOOLCHAIN_FLAGS --install-dir=$FF_TOOLCHAIN_PATH"
-# 如果toolchain/touch文件不存在，则创建touch文件，存在则修改时间属性.
-FF_TOOLCHAIN_TOUCH="$FF_TOOLCHAIN_PATH/touch"
-if [ ! -f "$FF_TOOLCHAIN_TOUCH" ]; then
-echo "准备安装独立工具链：$ANDROID_NDK/build/tools/make-standalone-toolchain.sh \
-        $FF_MAKE_TOOLCHAIN_FLAGS \
-        --platform=$FF_ANDROID_PLATFORM \
-        --toolchain=$FF_TOOLCHAIN_NAME"
-    $ANDROID_NDK/build/tools/make-standalone-toolchain.sh \
-        $FF_MAKE_TOOLCHAIN_FLAGS \
-        --platform=$FF_ANDROID_PLATFORM \
-        --toolchain=$FF_TOOLCHAIN_NAME
-    touch $FF_TOOLCHAIN_TOUCH;
-fi
 
 
 #--------------------
@@ -158,15 +110,16 @@ echo ""
 echo "--------------------"
 echo "[*] check x264 env"
 echo "--------------------"
-export PATH=$FF_TOOLCHAIN_PATH/bin:$PATH
+
+export CC=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+export AR=$FF_TOOLCHAIN_BIN/llvm-ar
+export NM=$FF_TOOLCHAIN_BIN/llvm-nm
 
 export COMMON_FF_CFG_FLAGS=
 
 # Support 16KB page size for x264
-if [ "$IJK_PAGE_SIZE" = "16384" ]; then
-    export LDFLAGS="-Wl,-z,max-page-size=16384"
-    echo "Adding 16KB page size support for x264"
-fi
+export LDFLAGS="-Wl,-z,max-page-size=$IJK_PAGE_SIZE"
+echo "Adding $IJK_PAGE_SIZE page size support for x264"
 
 FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
 
@@ -176,13 +129,8 @@ echo "FF_PREFIX = $FF_PREFIX"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --prefix=$FF_PREFIX"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-static --disable-shared"
 FF_CFG_FLAGS="$FF_CFG_FLAGS --enable-pic --enable-strip --disable-asm --disable-cli"
-#FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=$TOOLCHAIN/bin/arm-linux-androideabi-"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=${FF_CROSS_PREFIX}-"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --host=arm-linux"
-FF_CFG_FLAGS="$FF_CFG_FLAGS --sysroot=$FF_SYSROOT"
-
-#FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=${FF_CROSS_PREFIX}-"
-#FF_CFG_FLAGS="$FF_CFG_FLAGS $FF_PLATFORM_CFG_FLAGS"
+FF_CFG_FLAGS="$FF_CFG_FLAGS --cross-prefix=$FF_TOOLCHAIN_BIN/$FF_TOOLCHAIN_NAME-"
+FF_CFG_FLAGS="$FF_CFG_FLAGS $FF_PLATFORM_CFG_FLAGS"
 
 #--------------------
 echo ""
@@ -190,14 +138,8 @@ echo "--------------------"
 echo "[*] configurate x264"
 echo "--------------------"
 cd $FF_SOURCE && chmod +w configure
-#if [ -f "./Makefile" ]; then
-#    echo 'reuse configure'
-#else
-    echo "./configure $FF_CFG_FLAGS"
-    ./configure $FF_CFG_FLAGS
-#        --extra-cflags="$FF_CFLAGS $FF_EXTRA_CFLAGS" \
-#        --extra-ldflags="$FF_EXTRA_LDFLAGS"
-#fi
+echo "./configure $FF_CFG_FLAGS"
+./configure $FF_CFG_FLAGS
 
 #--------------------
 echo ""
@@ -205,7 +147,6 @@ echo "--------------------"
 echo "[*] compile x264"
 echo "--------------------"
 make depend
-# echo "make $FF_MAKE_FLAGS"
 make $FF_MAKE_FLAGS
 make install
 
@@ -214,3 +155,4 @@ echo ""
 echo "--------------------"
 echo "[*] link x264"
 echo "--------------------"
+

@@ -54,14 +54,7 @@ if [ "$FF_ARCH" = "armv7a" ]; then
     FF_BUILD_NAME=libsoxr-armv7a
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
-    FF_CMAKE_ABI="armeabi-v7a with NEON"
-    FF_CMAKE_EXTRA_FLAGS="-DHAVE_WORDS_BIGENDIAN_EXITCODE=1 -DWITH_SIMD=0"
-
-elif [ "$FF_ARCH" = "armv5" ]; then
-    FF_BUILD_NAME=libsoxr-armv5
-    FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
-
-    FF_CMAKE_ABI="armeabi"
+    FF_CMAKE_ABI="armeabi-v7a"
     FF_CMAKE_EXTRA_FLAGS="-DHAVE_WORDS_BIGENDIAN_EXITCODE=1 -DWITH_SIMD=0"
 
 elif [ "$FF_ARCH" = "x86" ]; then
@@ -72,16 +65,12 @@ elif [ "$FF_ARCH" = "x86" ]; then
     FF_CMAKE_EXTRA_FLAGS="-DHAVE_WORDS_BIGENDIAN_EXITCODE=1"
 
 elif [ "$FF_ARCH" = "x86_64" ]; then
-    FF_ANDROID_PLATFORM=android-21
-
     FF_BUILD_NAME=libsoxr-x86_64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
     FF_CMAKE_ABI="x86_64"
 
 elif [ "$FF_ARCH" = "arm64" ]; then
-    FF_ANDROID_PLATFORM=android-21
-
     FF_BUILD_NAME=libsoxr-arm64
     FF_SOURCE=$FF_BUILD_ROOT/$FF_BUILD_NAME
 
@@ -104,13 +93,12 @@ echo "--------------------"
 echo "[*] configurate libsoxr"
 echo "--------------------"
 cd $FF_CMAKE_BUILD_DIR
-FF_CMAKE_CFG_FLAGS="-DCMAKE_TOOLCHAIN_FILE=${FF_SOURCE}/android.toolchain.cmake -DANDROID_NDK=$ANDROID_NDK -DBUILD_EXAMPLES=0 -DBUILD_LSR_TESTS=0 -DBUILD_SHARED_LIBS=0 -DBUILD_TESTS=0 -DCMAKE_BUILD_TYPE=Release -DWITH_LSR_BINDINGS=0 -DWITH_OPENMP=0 -DWITH_PFFFT=0"
+# Use NDK's built-in toolchain file
+FF_CMAKE_CFG_FLAGS="-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake -DANDROID_NDK=$ANDROID_NDK -DANDROID_PLATFORM=android-21 -DBUILD_EXAMPLES=0 -DBUILD_LSR_TESTS=0 -DBUILD_SHARED_LIBS=0 -DBUILD_TESTS=0 -DCMAKE_BUILD_TYPE=Release -DWITH_LSR_BINDINGS=0 -DWITH_OPENMP=0 -DWITH_PFFFT=0"
 
 # Support 16KB page size for libsoxr
-if [ "$IJK_PAGE_SIZE" = "16384" ]; then
-    FF_CMAKE_CFG_FLAGS="$FF_CMAKE_CFG_FLAGS -DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
-    echo "Adding 16KB page size support for libsoxr"
-fi
+FF_CMAKE_CFG_FLAGS="$FF_CMAKE_CFG_FLAGS -DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=$IJK_PAGE_SIZE -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=$IJK_PAGE_SIZE"
+echo "Adding $IJK_PAGE_SIZE page size support for libsoxr"
 
 echo "cmake $FF_CMAKE_CFG_FLAGS -DANDROID_ABI=$FF_CMAKE_ABI -DCMAKE_INSTALL_PREFIX=$FF_PREFIX"
 cmake $FF_CMAKE_CFG_FLAGS $FF_CMAKE_EXTRA_FLAGS -DANDROID_ABI=$FF_CMAKE_ABI -DCMAKE_INSTALL_PREFIX=$FF_PREFIX $FF_SOURCE
@@ -123,3 +111,4 @@ echo "[*] compile libsoxr"
 echo "--------------------"
 make -j4
 make install
+
