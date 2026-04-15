@@ -9,6 +9,11 @@ Video player based on [ffplay](http://ffmpeg.org)
 
 ## NEW!
 
+- **2026-04 更新**：支持 Enhanced FLV (HEVC/Opus)
+    1. FFmpeg 自动集成 H265 通用补丁。
+    2. ff_ffplay 移除 H264 强制偏好，支持 HEVC 自动首选。
+    3. 适配 Android 15 16KB 内存页限制，优化编译兼容性。
+
 - 增加视频同步开关
 - 超过2倍速不生效
 - 增加边播边录+录屏代码
