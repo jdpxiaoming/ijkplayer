@@ -191,6 +191,7 @@ export AR=llvm-ar
 export LD=ld.lld
 export STRIP=llvm-strip
 export NM=llvm-nm
+export RANLIB=llvm-ranlib
 
 FF_CFLAGS="-O3 -Wall -pipe \
     -std=c99 \
@@ -222,6 +223,7 @@ if [ -f "${FF_DEP_OPENSSL_LIB}/libssl.a" ]; then
 
     FF_CFLAGS="$FF_CFLAGS -I${FF_DEP_OPENSSL_INC}"
     FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_OPENSSL_LIB} -lssl -lcrypto"
+    FF_DEP_LIBS_FINAL="$FF_DEP_LIBS_FINAL ${FF_DEP_OPENSSL_LIB}/libssl.a ${FF_DEP_OPENSSL_LIB}/libcrypto.a"
 fi
 
 if [ -f "${FF_DEP_LIBSOXR_LIB}/libsoxr.a" ]; then
@@ -230,6 +232,7 @@ if [ -f "${FF_DEP_LIBSOXR_LIB}/libsoxr.a" ]; then
 
     FF_CFLAGS="$FF_CFLAGS -I${FF_DEP_LIBSOXR_INC}"
     FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_LIBSOXR_LIB} -lsoxr -lm"
+    FF_DEP_LIBS_FINAL="$FF_DEP_LIBS_FINAL ${FF_DEP_LIBSOXR_LIB}/libsoxr.a -lm"
 fi
 
 if [ -f "${FF_DEP_X264_LIB}/libx264.a" ]; then
@@ -238,6 +241,7 @@ if [ -f "${FF_DEP_X264_LIB}/libx264.a" ]; then
 
     FF_CFLAGS="$FF_CFLAGS -I${FF_DEP_X264_INC}"
     FF_DEP_LIBS="$FF_DEP_LIBS -L${FF_DEP_X264_LIB} -lx264"
+    FF_DEP_LIBS_FINAL="$FF_DEP_LIBS_FINAL ${FF_DEP_X264_LIB}/libx264.a"
 fi
 
 FF_CFG_FLAGS="$FF_CFG_FLAGS $COMMON_FF_CFG_FLAGS"
@@ -340,7 +344,7 @@ $CC $FF_LINKER_FLAGS $FF_EXTRA_LDFLAGS \
     -Wl,-soname,libijkwdzffmpeg.so \
     $FF_C_OBJ_FILES \
     $FF_ASM_OBJ_FILES \
-    $FF_DEP_LIBS \
+    $FF_DEP_LIBS_FINAL \
     -o $FF_PREFIX/libijkwdzffmpeg.so
 
 mysedi() {
