@@ -46,10 +46,10 @@ dependencies {
 
 ### My Build Environment
 - Common
- - Mac OS X 10.11.5
+ - Mac OS X Tahoe 26.4.1 
 - Android
- - [NDK r10e](http://developer.android.com/tools/sdk/ndk/index.html)
- - Android Studio 2.1.3
+ - [NDK r27d](http://developer.android.com/tools/sdk/ndk/index.html)
+ - Android Studio panda 2. 
  - Gradle 2.14.1
 - iOS
  - Xcode 7.3 (7D175)
