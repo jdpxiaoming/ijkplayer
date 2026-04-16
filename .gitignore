@@ -11,6 +11,14 @@ ijkmedia/ijkyuv/
 ijkmedia/ijksoundtouch
 ijkprof/android-ndk-profiler/
 
+
+# 忽略android/contrib下的三方库修改
+android/contrib/ffmpeg-*/
+android/contrib/openssl-*/
+android/contrib/x264-*/
+android/contrib/libsoxr-*/
+
+
 # built application files
 *.apk
 *.ap_
