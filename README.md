@@ -141,12 +141,37 @@ sudo dpkg-reconfigure dash
 - If you'd like to share your config, pull request is welcome.
 
 ### Build Android
-```
-git clone https://github.com/Bilibili/ijkplayer.git ijkplayer-android
-cd ijkplayer-android
-git checkout -B latest k0.8.8
+```bash
 
+#//拉取openssl
+./init-openssl.sh
+
+#//拉取x264
+./init-android-x264.sh
+
+#//拉取ffmpeg:
 ./init-android.sh
+
+# 编译各平台的openssl、x264、ffmpeg软解码库.
+cd android/contrib
+
+//编译各平台的openssl
+./compile-openssl.sh clean
+./compile-openssl.sh all 
+
+#//编译各平台的x264
+./compile-x264.sh clean
+./compile-x264.sh all
+
+//编译ffmpeg软解码库
+./compile-ffmpeg.sh clean
+./compile-ffmpeg.sh all
+
+#// 编译ijkplayer
+
+$ cd ..
+
+$ ./compile-ijk.sh all
 
 cd android/contrib
 ./compile-ffmpeg.sh clean

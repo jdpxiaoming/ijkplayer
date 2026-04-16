@@ -28,7 +28,8 @@ set +x
 
 FF_ACT_ARCHS_32="armv7a x86"
 FF_ACT_ARCHS_64="arm64 x86_64"
-FF_ACT_ARCHS_ALL="armv7a arm64 x86 x86_64"
+#FF_ACT_ARCHS_ALL="armv7a arm64 x86 x86_64"
+FF_ACT_ARCHS_ALL="armv7a arm64"
 
 echo_archs() {
     echo "===================="
