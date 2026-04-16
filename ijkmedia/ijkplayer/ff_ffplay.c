@@ -3216,12 +3216,13 @@ static void ffp_reset_record_static_state(void);
  
      if (ffp->iformat_name)
          is->iformat = av_find_input_format(ffp->iformat_name);
-     err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
-     if (err < 0) {
-         print_error(is->filename, err);
-         ret = -1;
-         goto fail;
-     }
+    err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
+    if (err < 0) {
+        print_error(is->filename, err);
+        last_error = err;
+        ret = -1;
+        goto fail;
+    }
      ffp_notify_msg1(ffp, FFP_MSG_OPEN_INPUT);
  
      if (scan_all_pmts_set)
@@ -3271,12 +3272,13 @@ static void ffp_reset_record_static_state(void);
              av_dict_free(&opts[i]);
          av_freep(&opts);
  
-         if (err < 0) {
-             av_log(NULL, AV_LOG_WARNING,
-                    "%s: could not find codec parameters\n", is->filename);
-             ret = -1;
-             goto fail;
-         }
+        if (err < 0) {
+            av_log(NULL, AV_LOG_WARNING,
+                   "%s: could not find codec parameters\n", is->filename);
+            last_error = err;
+            ret = -1;
+            goto fail;
+        }
      }
      if (ic->pb)
          ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
@@ -3426,12 +3428,13 @@ static void ffp_reset_record_static_state(void);
      if (st_index[AVMEDIA_TYPE_SUBTITLE] >= 0)
          ijkmeta_set_int64_l(ffp->meta, IJKM_KEY_TIMEDTEXT_STREAM, st_index[AVMEDIA_TYPE_SUBTITLE]);
  
-     if (is->video_stream < 0 && is->audio_stream < 0) {
-         av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filtergraph\n",
-                is->filename);
-         ret = -1;
-         goto fail;
-     }
+    if (is->video_stream < 0 && is->audio_stream < 0) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filtergraph\n",
+               is->filename);
+        last_error = AVERROR_STREAM_NOT_FOUND;
+        ret = -1;
+        goto fail;
+    }
      if (is->audio_stream >= 0) {
          is->audioq.is_buffer_indicator = 1;
          is->buffer_indicator_queue = &is->audioq;
@@ -3670,20 +3673,21 @@ static void ffp_reset_record_static_state(void);
                      packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
                  is->eof = 1;
              }
-             if (pb_error) {
-     if (is->video_stream >= 0)
-                     packet_queue_put_nullpacket(&is->videoq, is->video_stream);
-                 if (is->audio_stream >= 0)
-                     packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
-     if (is->subtitle_stream >= 0)
-                     packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
-                 is->eof = 1;
-                 ffp->error = pb_error;
-                 av_log(ffp, AV_LOG_ERROR, "av_read_frame error: %s\n", ffp_get_error_string(ffp->error));
-                 // break;
-             } else {
-                 ffp->error = 0;
-             }
+            if (pb_error) {
+    if (is->video_stream >= 0)
+                    packet_queue_put_nullpacket(&is->videoq, is->video_stream);
+                if (is->audio_stream >= 0)
+                    packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
+    if (is->subtitle_stream >= 0)
+                    packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
+                is->eof = 1;
+                ffp->error = pb_error;
+                last_error = pb_error;
+                av_log(ffp, AV_LOG_ERROR, "av_read_frame error: %s\n", ffp_get_error_string(ffp->error));
+                // break;
+            } else {
+                ffp->error = 0;
+            }
              if (is->eof) {
                  ffp_toggle_buffering(ffp, 0);
                  SDL_Delay(100);
@@ -3802,10 +3806,12 @@ static void ffp_reset_record_static_state(void);
      if (ic && !is->ic)
          avformat_close_input(&ic);
  
-     if (!ffp->prepared || !is->abort_request) {
-         ffp->last_error = last_error;
-         ffp_notify_msg2(ffp, FFP_MSG_ERROR, last_error);
-     }
+    if (!ffp->prepared || !is->abort_request) {
+        ffp->last_error = last_error;
+        av_log(ffp, AV_LOG_ERROR, "read_thread fail: last_error=%d (%s)\n",
+               last_error, ffp_get_error_string(last_error));
+        ffp_notify_msg2(ffp, FFP_MSG_ERROR, last_error);
+    }
      SDL_DestroyMutex(wait_mutex);
      return 0;
  }
