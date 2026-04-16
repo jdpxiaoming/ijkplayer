@@ -28,6 +28,8 @@ IJK_FFMPEG_LOCAL_REPO=extra/ffmpeg
 
 set -e
 TOOLS=tools
+IJK_ROOT="$(cd "$(dirname "$0")" && pwd)"
+IJK_FFMPEG_LOCAL_PATCH="$IJK_ROOT/ffmpeg-r27d-unified.patch"
 
 git --version
 
@@ -63,6 +65,31 @@ function ensure_ffmpeg_openssl_probe()
     chmod +x "$cfg_file"
 }
 
+function apply_ffmpeg_local_patch()
+{
+    local ffmpeg_dir=$1
+    local patch_file=$IJK_FFMPEG_LOCAL_PATCH
+
+    if [ ! -f "$patch_file" ]; then
+        echo "ffmpeg local patch not found, skip: $patch_file"
+        return 0
+    fi
+
+    if git -C "$ffmpeg_dir" apply --check "$patch_file" >/dev/null 2>&1; then
+        echo "applying local ffmpeg patch: $patch_file -> $ffmpeg_dir"
+        git -C "$ffmpeg_dir" apply "$patch_file"
+        return 0
+    fi
+
+    if git -C "$ffmpeg_dir" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
+        echo "local ffmpeg patch already applied: $patch_file -> $ffmpeg_dir"
+        return 0
+    fi
+
+    echo "!! ERROR: failed to apply local ffmpeg patch: $patch_file -> $ffmpeg_dir"
+    return 1
+}
+
 
 echo "== pull ffmpeg base =="
 sh $TOOLS/pull-repo-base.sh $IJK_FFMPEG_UPSTREAM $IJK_FFMPEG_LOCAL_REPO
@@ -78,6 +105,7 @@ function pull_fork()
         patch -p1 < ../../ffmpeg-let-rtmp-flv-support-hevc-h265-opus-clean.patch
     fi
     cd -
+    apply_ffmpeg_local_patch "android/contrib/ffmpeg-$1"
     ensure_ffmpeg_openssl_probe "android/contrib/ffmpeg-$1"
 }
 
