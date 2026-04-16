@@ -24,18 +24,18 @@ fi
 
 REQUEST_TARGET=$1
 REQUEST_SUB_CMD=$2
-ACT_ABI_32="armv7a x86"
-ACT_ABI_64="arm64 x86_64"
-ACT_ABI_ALL="armv7a arm64 x86 x86_64"
+ACT_ABI_32="armv7a"
+ACT_ABI_64="arm64"
+ACT_ABI_ALL="armv7a arm64"
 UNAME_S=$(uname -s)
 
 FF_MAKEFLAGS=
-if which nproc >/dev/null
-then
-    FF_MAKEFLAGS=-j`nproc`
-elif [ "$UNAME_S" = "Darwin" ] && which sysctl >/dev/null
+if [ "$UNAME_S" = "Darwin" ] && which sysctl >/dev/null
 then
     FF_MAKEFLAGS=-j`sysctl -n machdep.cpu.thread_count`
+elif which nproc >/dev/null
+then
+    FF_MAKEFLAGS=-j`nproc`
 fi
 
 do_sub_cmd () {
@@ -73,7 +73,7 @@ do_ndk_build () {
     PARAM_TARGET=$1
     PARAM_SUB_CMD=$2
     case "$PARAM_TARGET" in
-        armv7a|arm64|x86|x86_64)
+        armv7a|arm64)
             cd "ijkplayer/ijkplayer-$PARAM_TARGET/src/main/jni"
             if [ "$PARAM_SUB_CMD" = 'prof' ]; then 
                 if [ "$PARAM_TARGET" = "armv7a" ]; then
@@ -93,7 +93,13 @@ case "$REQUEST_TARGET" in
     "")
         do_ndk_build armv7a;
     ;;
-    armv7a|arm64|x86|x86_64)
+    arm64)
+        do_ndk_build $REQUEST_TARGET $REQUEST_SUB_CMD;
+    ;;
+    armv7a)
+        do_ndk_build $REQUEST_TARGET $REQUEST_SUB_CMD;
+    ;;
+    x86_64)
         do_ndk_build $REQUEST_TARGET $REQUEST_SUB_CMD;
     ;;
     all32)
@@ -122,10 +128,11 @@ case "$REQUEST_TARGET" in
     ;;
     *)
         echo "Usage:"
-        echo "  compile-ijk.sh armv7a|arm64|x86|x86_64"
-        echo "  compile-ijk.sh all|all32|all64"
+        echo "  compile-ijk.sh armv7a"
+        echo "  compile-ijk.sh arm64"
+        echo "  compile-ijk.sh x86_64"
+        echo "  compile-ijk.sh all|all32"
+        echo "  compile-ijk.sh all64"
         echo "  compile-ijk.sh clean"
     ;;
 esac
-
-

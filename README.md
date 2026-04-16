@@ -1,11 +1,12 @@
 # ijkplayer
 
- Platform | Build Status
- -------- | ------------
- Android | [![Build Status](https://travis-ci.org/Bilibili/ci-ijk-ffmpeg-android.svg?branch=master)](https://travis-ci.org/Bilibili/ci-ijk-ffmpeg-android)
- iOS | [![Build Status](https://travis-ci.org/Bilibili/ci-ijk-ffmpeg-ios.svg?branch=master)](https://travis-ci.org/Bilibili/ci-ijk-ffmpeg-ios)
-
 Video player based on [ffplay](http://ffmpeg.org)
+
+
+## 【修改说明（64位16K + 32位可构建）】20260416
+
+> 当前链路以 **arm64-v8a 生产** 为主，保持 **arm64-v8a/x86_64 为 16K page size**；同时补齐 **armeabi-v7a（FFmpeg 4.3，4K page size）** 构建用于 32 位设备兼容。
+
 
 ## NEW!
 

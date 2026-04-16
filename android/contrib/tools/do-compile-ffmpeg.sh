@@ -59,7 +59,7 @@ FF_DEP_X264_LIB=
 FF_CFG_FLAGS=
 
 FF_EXTRA_CFLAGS=
-FF_EXTRA_LDFLAGS=
+FF_EXTRA_LDFLAGS="-Wl,-Bsymbolic"
 FF_DEP_LIBS=
 
 FF_MODULE_DIRS="compat libavcodec libavfilter libavformat libavutil libswresample libswscale"
@@ -125,7 +125,7 @@ elif [ "$FF_ARCH" = "x86_64" ]; then
     FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=x86_64 --enable-yasm"
 
     FF_EXTRA_CFLAGS="$FF_EXTRA_CFLAGS"
-    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS"
+    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
     FF_ASSEMBLER_SUB_DIRS="x86"
 
@@ -142,7 +142,7 @@ elif [ "$FF_ARCH" = "arm64" ]; then
     FF_CFG_FLAGS="$FF_CFG_FLAGS --arch=aarch64 --enable-yasm"
 
     FF_EXTRA_CFLAGS="$FF_EXTRA_CFLAGS"
-    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS"
+    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
     FF_ASSEMBLER_SUB_DIRS="aarch64 neon"
 
@@ -184,7 +184,11 @@ echo "--------------------"
 export PATH=$FF_TOOLCHAIN_BIN:$PATH
 
 # NDK Clang wrappers
-export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+if [ "$FF_ARCH" = "armv7a" ]; then
+    export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+else
+    export CC=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang
+fi
 export CXX=$FF_TOOLCHAIN_NAME$FF_ANDROID_PLATFORM-clang++
 export AS=$CC
 export AR=llvm-ar
@@ -201,15 +205,6 @@ FF_CFLAGS="-O3 -Wall -pipe \
     -Wa,--noexecstack \
     -Wno-incompatible-function-pointer-types \
     -DANDROID -DNDEBUG"
-
-# Support 16KB page size
-if [ "$IJK_PAGE_SIZE" = "16384" ]; then
-    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-z,max-page-size=16384 -Wl,-Bsymbolic"
-    echo "Adding 16KB page size support for ffmpeg"
-else
-    FF_EXTRA_LDFLAGS="$FF_EXTRA_LDFLAGS -Wl,-Bsymbolic"
-fi
-
 
 export COMMON_FF_CFG_FLAGS=
 . $FF_BUILD_ROOT/../../config/module.sh
@@ -284,9 +279,21 @@ echo "--------------------"
 echo "[*] configurate ffmpeg"
 echo "--------------------"
 cd $FF_SOURCE
+FF_RECONFIGURE=0
 if [ -f "./config.h" ]; then
-    echo 'reuse configure'
-else
+    if [ -f "${FF_DEP_OPENSSL_LIB}/libssl.a" ] && ! grep -q -- '--enable-openssl' ./config.h; then
+        echo 'stale configure without openssl, reconfigure'
+        FF_RECONFIGURE=1
+        make distclean > /dev/null 2>&1 || true
+        rm -f config.h config.mak
+        rm -f ffbuild/config.* ffbuild/.config
+    else
+        echo 'reuse configure'
+    fi
+fi
+
+if [ ! -f "./config.h" ] || [ "$FF_RECONFIGURE" = "1" ]; then
+    which $CC
     ./configure $FF_CFG_FLAGS \
         --cc=$CC \
         --cxx=$CXX \
@@ -338,7 +345,9 @@ done
 
 # Add page size flag for 16KB support
 FF_LINKER_FLAGS="-lm -lz -shared -Wl,--no-undefined -Wl,-z,noexecstack"
-FF_LINKER_FLAGS="$FF_LINKER_FLAGS -Wl,-z,max-page-size=$IJK_PAGE_SIZE"
+if [ "$IJK_PAGE_SIZE" = "16384" ]; then
+    FF_LINKER_FLAGS="$FF_LINKER_FLAGS -Wl,-z,max-page-size=16384"
+fi
 
 $CC $FF_LINKER_FLAGS $FF_EXTRA_LDFLAGS \
     -Wl,-soname,libijkwdzffmpeg.so \
@@ -381,4 +390,3 @@ for f in $FF_PREFIX/lib/pkgconfig/*.pc; do
     mysedi $f 's/-lswresample/-lijkwdzffmpeg/g'
     mysedi $f 's/-lswscale/-lijkwdzffmpeg/g'
 done
-

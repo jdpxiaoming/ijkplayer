@@ -169,6 +169,9 @@ export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-audiotoolbox"
 export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-videotoolbox"
 export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-linux-perf"
 export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-bzlib"
+export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-filter=derain"
+export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-filter=dnn_processing"
+export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --disable-filter=sr"
 
 #rtsp支持.
 export COMMON_FF_CFG_FLAGS="$COMMON_FF_CFG_FLAGS --enable-demuxer=rtsp"

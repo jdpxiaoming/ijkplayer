@@ -92,7 +92,7 @@ elif [ "$FF_ARCH" = "arm64" ]; then
 
     FF_CROSS_PREFIX=aarch64-linux-android
     FF_TOOLCHAIN_NAME=aarch64-linux-android
-    FF_PLATFORM_CFG_FLAGS="linux-aarch64"
+    FF_PLATFORM_CFG_FLAGS="linux-aarch64 no-asm"
 
 
 
