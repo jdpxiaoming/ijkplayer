@@ -1,5 +1,5 @@
 diff --git a/libavutil/dict.c b/libavutil/dict.c
-index 985208889b2..4a8ae0fea08 100644
+index 98520888..4a8ae0fe 100644
 --- a/libavutil/dict.c
 +++ b/libavutil/dict.c
 @@ -157,36 +157,35 @@ int av_dict_set_intptr(AVDictionary **pm, const char *key, uintptr_t value,
@@ -44,4 +44,18 @@ index 985208889b2..4a8ae0fea08 100644
 +    snprintf(valuestr, sizeof(valuestr), "0x%"PRIxPTR, value);
      return av_strdup(valuestr);
  }
-
+ 
+diff --git a/configure b/configure
+--- a/configure
++++ b/configure
+@@ -3312,7 +3312,9 @@ mlp_demuxer_select="mlp_parser"
+ mmf_muxer_select="riffenc"
+ mov_demuxer_select="iso_media riffdec"
+ mov_demuxer_suggest="zlib"
+-mov_muxer_select="iso_media riffenc rtpenc_chain vp9_superframe_bsf aac_adtstoasc_bsf"
++# Keep MP4/MOV recording available in slim Android builds while preserving
++# required RIFF/RTP hinting helpers and dropping the pruned VP9-only helper.
++mov_muxer_select="iso_media riffenc rtpenc_chain aac_adtstoasc_bsf"
+ mp3_demuxer_select="mpegaudio_parser"
+ mp3_muxer_select="mpegaudioheader"
+ mp4_muxer_select="mov_muxer"

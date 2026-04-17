@@ -1,0 +1,56 @@
+# -----
+build/
+ffmpeg-temp/
+android/ffmpeg-*
+android/openssl-*
+ios/ffmpeg-*
+ios/openssl-*
+extra
+.DS_Store
+ijkmedia/ijkyuv/
+ijkmedia/ijksoundtouch
+ijkprof/android-ndk-profiler/
+
+
+# 忽略android/contrib下的三方库修改
+android/contrib/ffmpeg-*/
+android/contrib/openssl-*/
+android/contrib/x264-*/
+android/contrib/libsoxr-*/
+
+
+# built application files
+*.apk
+*.ap_
+
+# files for the dex VM
+*.dex
+
+# Java class files
+*.class
+
+# generated files
+bin/
+gen/
+libs/
+obj/
+ijkmedia/ijkplayer/ijkversion.h
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Android Studio
+.idea
+.gradle
+build/
+
+# Xcode
+xcuserdata
+xcshareddata
+*.xccheckout
+
+/x264/
+/soundtouch/
+/openssl/
+/libyuv/
+/ffmpeg/
