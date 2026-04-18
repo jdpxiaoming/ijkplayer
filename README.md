@@ -7,6 +7,8 @@ Video player based on [ffplay](http://ffmpeg.org)
 
 > 当前链路以 **arm64-v8a 生产** 为主，保持 **arm64-v8a/x86_64 为 16K page size**；同时补齐 **armeabi-v7a（FFmpeg 4.3，4K page size）** 构建用于 32 位设备兼容。
 
+- [FFmpegTools C++ 迁移说明](docs/ffmpegtools-migration.md)
+
 
 ## NEW!
 

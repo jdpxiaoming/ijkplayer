@@ -15,6 +15,11 @@ static char **g_argv = NULL;
 static int g_argc = 0;
 static pthread_mutex_t g_cmd_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct JniThreadEnv {
+    JNIEnv *env;
+    int attached_by_native;
+} JniThreadEnv;
+
 static void release_args_l(void)
 {
     int i;
@@ -71,60 +76,107 @@ static int copy_args(JNIEnv *env, jint argc, jobjectArray argv)
     return 0;
 }
 
-static JNIEnv *attach_thread(void)
+static JniThreadEnv attach_thread(void)
 {
-    JNIEnv *env = NULL;
+    JniThreadEnv thread_env;
+
+    thread_env.env = NULL;
+    thread_env.attached_by_native = 0;
 
     if (!g_jvm)
-        return NULL;
+        return thread_env;
 
-    if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != JNI_OK)
-        return NULL;
+    if ((*g_jvm)->GetEnv(g_jvm, (void **)&thread_env.env, JNI_VERSION_1_6) == JNI_OK)
+        return thread_env;
 
-    return env;
+    if ((*g_jvm)->AttachCurrentThread(g_jvm, &thread_env.env, NULL) != JNI_OK) {
+        thread_env.env = NULL;
+        return thread_env;
+    }
+
+    thread_env.attached_by_native = 1;
+    return thread_env;
 }
 
-static void detach_thread(void)
+static void detach_thread(JniThreadEnv *thread_env)
 {
-    if (g_jvm)
+    if (thread_env && thread_env->attached_by_native && g_jvm)
         (*g_jvm)->DetachCurrentThread(g_jvm);
 }
 
-static void call_java_int(const char *method_name, jint value)
+static int call_java_int_if_exists(const char *method_name, jint value)
 {
-    JNIEnv *env = attach_thread();
+    JniThreadEnv thread_env = attach_thread();
+    JNIEnv *env = thread_env.env;
     jmethodID method_id = NULL;
+    int called = 0;
 
     if (!env || !g_ffmpeg_cmd_class)
         goto out;
 
     method_id = (*env)->GetStaticMethodID(env, g_ffmpeg_cmd_class, method_name, "(I)V");
-    if (method_id)
+    if (method_id) {
         (*env)->CallStaticVoidMethod(env, g_ffmpeg_cmd_class, method_id, value);
+        called = 1;
+    } else {
+        (*env)->ExceptionClear(env);
+    }
 
 out:
-    detach_thread();
+    detach_thread(&thread_env);
+    return called;
 }
 
-static void call_java_float(const char *method_name, jfloat value)
+static int call_java_void_if_exists(const char *method_name)
 {
-    JNIEnv *env = attach_thread();
+    JniThreadEnv thread_env = attach_thread();
+    JNIEnv *env = thread_env.env;
     jmethodID method_id = NULL;
+    int called = 0;
+
+    if (!env || !g_ffmpeg_cmd_class)
+        goto out;
+
+    method_id = (*env)->GetStaticMethodID(env, g_ffmpeg_cmd_class, method_name, "()V");
+    if (method_id) {
+        (*env)->CallStaticVoidMethod(env, g_ffmpeg_cmd_class, method_id);
+        called = 1;
+    } else {
+        (*env)->ExceptionClear(env);
+    }
+
+out:
+    detach_thread(&thread_env);
+    return called;
+}
+
+static int call_java_float_if_exists(const char *method_name, jfloat value)
+{
+    JniThreadEnv thread_env = attach_thread();
+    JNIEnv *env = thread_env.env;
+    jmethodID method_id = NULL;
+    int called = 0;
 
     if (!env || !g_ffmpeg_cmd_class)
         goto out;
 
     method_id = (*env)->GetStaticMethodID(env, g_ffmpeg_cmd_class, method_name, "(F)V");
-    if (method_id)
+    if (method_id) {
         (*env)->CallStaticVoidMethod(env, g_ffmpeg_cmd_class, method_id, value);
+        called = 1;
+    } else {
+        (*env)->ExceptionClear(env);
+    }
 
 out:
-    detach_thread();
+    detach_thread(&thread_env);
+    return called;
 }
 
 static void ffmpeg_thread_finished(int ret)
 {
-    call_java_int("onNativeExecuted", ret);
+    if (!call_java_int_if_exists("onNativeExecuted", ret))
+        call_java_int_if_exists("onExecuted", ret);
 
     pthread_mutex_lock(&g_cmd_mutex);
     release_args_l();
@@ -133,27 +185,29 @@ static void ffmpeg_thread_finished(int ret)
 
 void ffmpeg_progress(float progress)
 {
-    call_java_float("onNativeProgress", progress);
+    if (!call_java_float_if_exists("onNativeProgress", progress))
+        call_java_float_if_exists("onProgress", progress);
 }
 
 void ffmpeg_complete(int errorCode)
 {
-    call_java_int("onNativeComplete", errorCode);
+    if (!call_java_int_if_exists("onNativeComplete", errorCode))
+        call_java_void_if_exists("onComplete");
 }
 
 void ffmpeg_failure(int errorCode)
 {
-    call_java_int("onNativeFailure", errorCode);
+    if (!call_java_int_if_exists("onNativeFailure", errorCode))
+        call_java_void_if_exists("onFailure");
 }
 
 void ffmpeg_cancel_finish(int errorCode)
 {
-    call_java_int("onNativeCancelFinish", errorCode);
+    if (!call_java_int_if_exists("onNativeCancelFinish", errorCode))
+        call_java_void_if_exists("onCancelFinish");
 }
 
-JNIEXPORT jint JNICALL
-Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExec(JNIEnv *env, jclass clazz,
-                                                                 jint argc, jobjectArray argv)
+static jint ijk_ffmpeg_cmd_exec(JNIEnv *env, jclass clazz, jint argc, jobjectArray argv)
 {
     int ret = 0;
 
@@ -182,8 +236,7 @@ Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExec(JNIEnv *env, jc
     return ret;
 }
 
-JNIEXPORT void JNICALL
-Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExit(JNIEnv *env, jclass clazz)
+static void ijk_ffmpeg_cmd_exit(JNIEnv *env, jclass clazz)
 {
     (void)env;
     (void)clazz;
@@ -196,4 +249,30 @@ Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExit(JNIEnv *env, jc
     pthread_mutex_lock(&g_cmd_mutex);
     release_args_l();
     pthread_mutex_unlock(&g_cmd_mutex);
+}
+
+JNIEXPORT jint JNICALL
+Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExec(JNIEnv *env, jclass clazz,
+                                                                 jint argc, jobjectArray argv)
+{
+    return ijk_ffmpeg_cmd_exec(env, clazz, argc, argv);
+}
+
+JNIEXPORT void JNICALL
+Java_tv_danmaku_ijk_media_player_ffmpeg_cmd_FFmpegCmd_nativeExit(JNIEnv *env, jclass clazz)
+{
+    ijk_ffmpeg_cmd_exit(env, clazz);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jdpxiaoming_ffmpeg_1cmd_FFmpegCmd_exec(JNIEnv *env, jclass clazz,
+                                                jint argc, jobjectArray argv)
+{
+    return ijk_ffmpeg_cmd_exec(env, clazz, argc, argv);
+}
+
+JNIEXPORT void JNICALL
+Java_com_jdpxiaoming_ffmpeg_1cmd_FFmpegCmd_exit(JNIEnv *env, jclass clazz)
+{
+    ijk_ffmpeg_cmd_exit(env, clazz);
 }
