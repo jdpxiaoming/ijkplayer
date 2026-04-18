@@ -63,7 +63,6 @@
 #include "libavutil/time.h"
 #include "libavutil/thread.h"
 #include "libavutil/threadmessage.h"
-#include "libavcodec/mathops.h"
 #include "libavformat/os_support.h"
 
 # include "libavfilter/avfilter.h"
@@ -107,6 +106,13 @@
 #include "libavutil/avassert.h"
 
 #include "android_log.h"
+
+static inline int mid_pred(int a, int b, int c)
+{
+    if (a > b)
+        return b > c ? b : (a > c ? c : a);
+    return a > c ? a : (b > c ? c : b);
+}
 
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
@@ -4837,7 +4843,7 @@ static void log_callback_test2(void *ptr, int level, const char *fmt, va_list vl
 //main函数入口.
 int ffmpeg_exec(int argc, char **argv)
 {
-    LOGE("ffmpeg_exec ---------------------------------->>>");
+    LOGE("ffmpeg_exec ------------------------------1`---->>>");
     int i, ret;
     int64_t ti;
 
