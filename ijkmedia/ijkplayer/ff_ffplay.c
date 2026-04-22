@@ -5828,11 +5828,12 @@ static void ffp_reset_record_static_state(void);
      ffp->record_error = 1;
      return -1;
  }
- //stop record video. add by poe 2024/07/27. 
- int ffp_stop_record(FFPlayer *ffp)
- {
-     assert(ffp);
- 
+
+ //stop record video.
+int ffp_stop_record(FFPlayer *ffp)
+{
+    assert(ffp);
+
     if (!ffp->is_record) {
         av_log(ffp, AV_LOG_WARNING, "⚠️ 当前不在录制状态，无需停止录制\n");
         return 0;
@@ -5840,6 +5841,7 @@ static void ffp_reset_record_static_state(void);
     
     char *recorded_file_path = NULL;
     int has_hevc_stream = 0;
+    int record_finish_ret = 0;
     
     // 线程安全：先获取锁
          pthread_mutex_lock(&ffp->record_mutex);
@@ -5877,18 +5879,10 @@ static void ffp_reset_record_static_state(void);
          if (ffp->last_record_pts != AV_NOPTS_VALUE && ffp->last_record_pts > 0) {
              // 优先使用音频时长，没有音频则使用视频时长
              double master_duration_sec = 0;
-             
-            //  if (ffp->audio_frame_count > 0) {
-            //      // 有音频：以音频为主时钟
-            //      master_duration_sec = (double)(ffp->audio_frame_count * 1024) / 44100.0;
-            //      av_log(ffp, AV_LOG_INFO, "🎵 以音频为主时钟: %d帧 × 1024样本 ÷ 44100Hz = %.2f秒", 
-            //             ffp->audio_frame_count, master_duration_sec);
-            //  } else {
-                 // 无音频：以视频为主时钟
-                 master_duration_sec = (double)ffp->video_frame_count / 25.0;
-                 av_log(ffp, AV_LOG_INFO, "🎬 以视频为主时钟: %d帧 ÷ 25fps = %.2f秒", 
+             // 无音频：以视频为主时钟
+             master_duration_sec = (double)ffp->video_frame_count / 25.0;
+             av_log(ffp, AV_LOG_INFO, "🎬 以视频为主时钟: %d帧 ÷ 25fps = %.2f秒",
                         ffp->video_frame_count, master_duration_sec);
-            //  }
              
              // 为每个流设置duration（使用各自的时间基准）
              for (int i = 0; i < ffp->m_ofmt_ctx->nb_streams; i++) {
@@ -6203,6 +6197,7 @@ static void ffp_reset_record_static_state(void);
             av_log(ffp, AV_LOG_ERROR, "❌ 文件尾写入最终失败: %s (错误代码:%d)\n", 
                    av_err2str(trailer_ret), trailer_ret);
             av_log(ffp, AV_LOG_WARNING, "⚠️ 文件可能不完整，但已尽力保存数据\n");
+            record_finish_ret = trailer_ret;
         }
         
         // 安全地关闭文件
@@ -6210,11 +6205,14 @@ static void ffp_reset_record_static_state(void);
             int close_ret = avio_closep(&ffp->m_ofmt_ctx->pb);
             if (close_ret < 0) {
                 av_log(ffp, AV_LOG_WARNING, "⚠️ 关闭文件时出现警告: %s\n", av_err2str(close_ret));
+                if (record_finish_ret == 0) {
+                    record_finish_ret = close_ret;
+                }
             }
         }
         
         // 🔧 暂时禁用MP4完整性检查以定位崩溃问题
-        // TODO: 重新启用并修复崩溃问题
+        // DO: 重新启用并修复崩溃问题
         if (recorded_file_path && strlen(recorded_file_path) > 0) {
             av_log(ffp, AV_LOG_INFO, "📋 录制完成，文件路径: %s\n", recorded_file_path);
             // av_log(ffp, AV_LOG_INFO, "🔧 MP4完整性检查已暂时禁用（避免崩溃）\n");
@@ -6225,11 +6223,17 @@ static void ffp_reset_record_static_state(void);
                 fseek(file, 0, SEEK_END);
                 long file_size = ftell(file);
                 fclose(file);
+                if (file_size <= 0 && record_finish_ret == 0) {
+                    record_finish_ret = -1;
+                }
                 if (DEBUG_RECORD_OPEN) {
                     av_log(ffp, AV_LOG_INFO, "📊 录制文件大小: %ld 字节\n", file_size);
                 }
             } else {
                 av_log(ffp, AV_LOG_ERROR, "❌ 无法访问录制文件\n");
+                if (record_finish_ret == 0) {
+                    record_finish_ret = -1;
+                }
             }
         }
         
@@ -6309,6 +6313,9 @@ static void ffp_reset_record_static_state(void);
     if (DEBUG_RECORD_OPEN) {
         av_log(ffp, AV_LOG_INFO, "✅ 录制停止完成\n");
     }
+
+    // 只在文件真正完成 trailer/close/check 之后通知 Android 刷新媒体库。
+    ffp_notify_msg2(ffp, FFP_MSG_RECORD_FINISH, record_finish_ret);
     
     // H265后处理：暂时禁用重编码，避免播放中断
     // if (has_hevc_stream && recorded_file_path) {

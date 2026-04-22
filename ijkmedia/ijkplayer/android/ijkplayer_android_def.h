@@ -143,6 +143,7 @@ enum media_info_type {
     MEDIA_INFO_AUDIO_SEEK_RENDERING_START = 10009,
 
     MEDIA_INFO_MEDIA_ACCURATE_SEEK_COMPLETE = 10100,
+    MEDIA_INFO_RECORD_FINISH = 10101,
 };
 
 typedef struct ijkmp_mediacodecinfo_context
