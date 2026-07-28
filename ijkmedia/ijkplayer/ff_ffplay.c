@@ -5242,9 +5242,11 @@ static void ffp_reset_record_static_state(void);
      ffp->is_record = 0;
      ffp->record_error = 0;
      ffp->is_first = 0;
-     ffp->waiting_for_keyframe = 1; // 🔧 H265修复：开始录制时等待关键帧
+     ffp->waiting_for_keyframe = 0;
      ffp->record_first_vpts = AV_NOPTS_VALUE;
      ffp->record_first_apts = AV_NOPTS_VALUE; // 🔧 重置音频基准时间戳
+     ffp->record_first_ts_us = AV_NOPTS_VALUE;
+     ffp->has_hevc_video = 0;
      ffp->stream_mapping = NULL;
      ffp->nb_output_streams = 0;
      
@@ -5305,6 +5307,10 @@ static void ffp_reset_record_static_state(void);
              if (is->video_stream >= 0 && i != is->video_stream) {
                  av_log(ffp, AV_LOG_INFO, "⏭️ 跳过非主视频流 %d (主视频流: %d)\n", i, is->video_stream);
                  continue;
+             }
+             if (in_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+                 ffp->has_hevc_video = 1;
+                 ffp->waiting_for_keyframe = 1;
              }
          } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
              // 🎯 关键修复：录制音频但不干扰播放
@@ -6210,6 +6216,11 @@ int ffp_stop_record(FFPlayer *ffp)
                 }
             }
         }
+
+        if (has_hevc_stream && ffp->video_frame_count == 0 && record_finish_ret == 0) {
+            av_log(ffp, AV_LOG_ERROR, "No decodable HEVC keyframe arrived before recording stopped\n");
+            record_finish_ret = AVERROR_INVALIDDATA;
+        }
         
         // 🔧 暂时禁用MP4完整性检查以定位崩溃问题
         // DO: 重新启用并修复崩溃问题
@@ -6277,12 +6288,14 @@ int ffp_stop_record(FFPlayer *ffp)
     // 🔧 重置其他状态变量
     ffp->record_first_vpts = AV_NOPTS_VALUE;
     ffp->record_first_apts = AV_NOPTS_VALUE;
+    ffp->record_first_ts_us = AV_NOPTS_VALUE;
     ffp->last_record_pts = AV_NOPTS_VALUE;
     ffp->prev_video_pts = AV_NOPTS_VALUE;
     ffp->prev_audio_pts = AV_NOPTS_VALUE;
     ffp->video_frame_count = 0;
     ffp->audio_frame_count = 0;
     ffp->waiting_for_keyframe = 0;
+    ffp->has_hevc_video = 0;
     
     pthread_mutex_unlock(&ffp->record_mutex);
     
@@ -6510,6 +6523,61 @@ int ffp_stop_record(FFPlayer *ffp)
 // 🔧 全局重置标志，用于重置静态变量
 static volatile int g_reset_static_vars = 0;
 
+static int hevc_nal_is_irap(uint8_t header)
+{
+    int nal_type = (header >> 1) & 0x3f;
+    return nal_type >= 16 && nal_type <= 21;
+}
+
+static int hevc_packet_contains_irap(const uint8_t *data, int size)
+{
+    int offset;
+
+    if (!data || size < 2) {
+        return 0;
+    }
+
+    // Annex-B, including the malformed length-prefixed/Annex-B hybrid packets
+    // produced by some Enhanced FLV streams.
+    for (offset = 0; offset + 3 < size; offset++) {
+        int nal_offset = -1;
+
+        if (data[offset] == 0 && data[offset + 1] == 0) {
+            if (data[offset + 2] == 1) {
+                nal_offset = offset + 3;
+            } else if (offset + 4 < size && data[offset + 2] == 0 && data[offset + 3] == 1) {
+                nal_offset = offset + 4;
+            }
+        }
+
+        if (nal_offset >= 0 && nal_offset < size && hevc_nal_is_irap(data[nal_offset])) {
+            return 1;
+        }
+    }
+
+    // Standard MP4-style four-byte length-prefixed NAL units. Check every NAL,
+    // because AUD/VPS/SPS/PPS units may precede the IRAP slice.
+    offset = 0;
+    while (offset + 4 <= size) {
+        uint32_t nal_size = ((uint32_t)data[offset] << 24) |
+                            ((uint32_t)data[offset + 1] << 16) |
+                            ((uint32_t)data[offset + 2] << 8) |
+                            (uint32_t)data[offset + 3];
+        offset += 4;
+
+        if (nal_size == 0 || nal_size > (uint32_t)(size - offset)) {
+            break;
+        }
+        if (hevc_nal_is_irap(data[offset])) {
+            return 1;
+        }
+        offset += (int)nal_size;
+    }
+
+    // Some demuxers expose a single raw NAL without a start code or length.
+    return hevc_nal_is_irap(data[0]);
+}
+
 // 🔧 重置录制函数中的静态状态 - 解决第二次录制失败问题
 void ffp_reset_record_static_state(void) {
     // 🔧 关键修复：设置全局重置标志，让ffp_record_file_simple重置静态变量
@@ -6620,57 +6688,25 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     
     // 🔧 H.265关键帧检测：确保从关键帧开始录制
     AVStream *in_stream = is->ic->streams[in_stream_index];
+
+    // Audio received before the first decodable HEVC frame would create a
+    // leading audio-only section. Start both streams at the same random-access point.
+    if (ffp->has_hevc_video && ffp->waiting_for_keyframe &&
+        in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        return 0;
+    }
+
     if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && 
         in_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
         
         // 如果还在等待关键帧，检查当前包是否为关键帧
         if (ffp->waiting_for_keyframe) {
-            // 🔧 修复：H.265流的关键帧检测可能不准确，尝试多种方式检测
-            int is_keyframe = 0;
-            
-            // 方法1：检查包标志
-            if (packet->flags & AV_PKT_FLAG_KEY) {
+            int is_keyframe = hevc_packet_contains_irap(packet->data, packet->size);
+
+            // Keep the demuxer flag as a fallback for packetizations without an
+            // inspectable NAL header, but never start because a packet count elapsed.
+            if (!is_keyframe && (packet->flags & AV_PKT_FLAG_KEY)) {
                 is_keyframe = 1;
-                av_log(ffp, AV_LOG_DEBUG, "🔍 H265: 通过包标志检测到关键帧\n");
-            }
-            
-            // 方法2：对于H.265，如果包标志不可靠，检查包大小（关键帧通常较大）
-            if (!is_keyframe && packet->size > 1000) {
-                // 检查是否包含NAL单元类型（简单启发式检测）
-                if (packet->data && packet->size > 4) {
-                    // H.265 NAL单元类型在第5个字节的高6位
-                    uint8_t nal_type = (packet->data[4] >> 1) & 0x3F;
-                    // IDR帧的NAL类型为19-20
-                    if (nal_type >= 19 && nal_type <= 20) {
-                        is_keyframe = 1;
-                        av_log(ffp, AV_LOG_DEBUG, "🔍 H265: 通过NAL类型检测到IDR帧 (type=%d)\n", nal_type);
-                    }
-                }
-            }
-            
-            // 方法3：如果前面的方法都失败，且已经等待了很久，强制开始录制
-            static int keyframe_wait_count = 0;
-            static int reset_flag = 0;
-            
-            // 🔧 检查全局重置标志，重置关键帧相关静态变量
-            if (g_reset_static_vars) {
-                keyframe_wait_count = 0;
-                reset_flag = 0;
-                av_log(ffp, AV_LOG_INFO, "🔧 已重置H265关键帧静态变量\n");
-            }
-            
-            // 🔧 重置静态变量（在新的录制开始时）
-            if (ffp->video_frame_count == 0 && ffp->audio_frame_count == 0 && reset_flag == 0) {
-                keyframe_wait_count = 0;
-                reset_flag = 1;
-                av_log(ffp, AV_LOG_DEBUG, "🔄 重置H265关键帧等待计数器\n");
-            }
-            
-            keyframe_wait_count++;
-            if (!is_keyframe && keyframe_wait_count > 50) { // 等待50个包后强制开始
-                is_keyframe = 1;
-                av_log(ffp, AV_LOG_WARNING, "⚠️ H265: 等待关键帧超时，强制开始录制\n");
-                keyframe_wait_count = 0;
             }
             
             if (!is_keyframe) {
@@ -6679,7 +6715,10 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
                 return 0; // 跳过非关键帧
             } else {
                 ffp->waiting_for_keyframe = 0; // 找到关键帧，开始录制
-                keyframe_wait_count = 0; // 重置计数器
+                int64_t first_ts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
+                if (first_ts != AV_NOPTS_VALUE) {
+                    ffp->record_first_ts_us = av_rescale_q(first_ts, in_stream->time_base, AV_TIME_BASE_Q);
+                }
                 if (DEBUG_RECORD_OPEN) {
                     av_log(ffp, AV_LOG_INFO, "🎯 H265: 找到关键帧，开始录制 PTS=%lld, flags=0x%x, size=%d\n", 
                            packet->pts, packet->flags, packet->size);
@@ -6721,24 +6760,41 @@ static int ffp_record_file_simple(FFPlayer *ffp, AVPacket *packet) {
     
     // 为每个流分别设置基准时间戳
     if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-        if (ffp->record_first_vpts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
-            ffp->record_first_vpts = pkt.pts;
-            av_log(ffp, AV_LOG_INFO, "🎯 设置视频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
-                   ffp->record_first_vpts, in_stream->time_base.num, in_stream->time_base.den);
-        }
-        
-        if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
-            int64_t relative_pts = pkt.pts - ffp->record_first_vpts;
-            if (relative_pts < 0) relative_pts = 0;
-            pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
-                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-        }
-        
-        if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
-            int64_t relative_dts = pkt.dts - ffp->record_first_vpts;
-            if (relative_dts < 0) relative_dts = 0;
-            pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
-                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+        if (ffp->has_hevc_video && ffp->record_first_ts_us != AV_NOPTS_VALUE) {
+            if (pkt.pts != AV_NOPTS_VALUE) {
+                int64_t relative_pts_us = av_rescale_q(pkt.pts, in_stream->time_base, AV_TIME_BASE_Q) -
+                                          ffp->record_first_ts_us;
+                pkt.pts = av_rescale_q_rnd(FFMAX(relative_pts_us, 0), AV_TIME_BASE_Q,
+                                           out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+            }
+            if (pkt.dts != AV_NOPTS_VALUE) {
+                int64_t relative_dts_us = av_rescale_q(pkt.dts, in_stream->time_base, AV_TIME_BASE_Q) -
+                                          ffp->record_first_ts_us;
+                pkt.dts = av_rescale_q_rnd(FFMAX(relative_dts_us, 0), AV_TIME_BASE_Q,
+                                           out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+            }
+        } else {
+            if (ffp->record_first_vpts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
+                ffp->record_first_vpts = pkt.pts;
+                av_log(ffp, AV_LOG_INFO, "🎯 设置视频流时间基准: PTS=%lld (时间基准:%d/%d)\n",
+                       ffp->record_first_vpts, in_stream->time_base.num, in_stream->time_base.den);
+            }
+
+            if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+                int64_t relative_pts = pkt.pts - ffp->record_first_vpts;
+                if (relative_pts < 0) relative_pts = 0;
+                pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            }
+
+            if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_vpts != AV_NOPTS_VALUE) {
+                int64_t relative_dts = pkt.dts - ffp->record_first_vpts;
+                if (relative_dts < 0) relative_dts = 0;
+                pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            }
         }
     } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
         // 🎯 音频处理：检查是否需要PCM_ALAW转AAC
@@ -7006,31 +7062,48 @@ audio_normal_process:
                    ffp->enable_pcm_to_aac_transcode);
         }
         
-        // 音频流使用独立的基准时间戳
-        if (ffp->record_first_apts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
-            ffp->record_first_apts = pkt.pts;
-            if (DEBUG_RECORD_OPEN) {
-                av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
-                   ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+        // HEVC recordings use the same random-access origin for audio and video.
+        if (ffp->has_hevc_video && ffp->record_first_ts_us != AV_NOPTS_VALUE) {
+            if (pkt.pts != AV_NOPTS_VALUE) {
+                int64_t relative_pts_us = av_rescale_q(pkt.pts, in_stream->time_base, AV_TIME_BASE_Q) -
+                                          ffp->record_first_ts_us;
+                pkt.pts = av_rescale_q_rnd(FFMAX(relative_pts_us, 0), AV_TIME_BASE_Q,
+                                           out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
             }
-        }
-        
-        if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
-            int64_t relative_pts = pkt.pts - ffp->record_first_apts;
-            if (relative_pts < 0) relative_pts = 0;
-            pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base, 
-                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-            if (DEBUG_RECORD_OPEN) {
-                av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n", 
+            if (pkt.dts != AV_NOPTS_VALUE) {
+                int64_t relative_dts_us = av_rescale_q(pkt.dts, in_stream->time_base, AV_TIME_BASE_Q) -
+                                          ffp->record_first_ts_us;
+                pkt.dts = av_rescale_q_rnd(FFMAX(relative_dts_us, 0), AV_TIME_BASE_Q,
+                                           out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+            }
+        } else {
+            if (ffp->record_first_apts == AV_NOPTS_VALUE && pkt.pts != AV_NOPTS_VALUE) {
+                ffp->record_first_apts = pkt.pts;
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n",
                        ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+                }
             }
-        }
-        
-        if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
-            int64_t relative_dts = pkt.dts - ffp->record_first_apts;
-            if (relative_dts < 0) relative_dts = 0;
-            pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base, 
-                                       (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+
+            if (pkt.pts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
+                int64_t relative_pts = pkt.pts - ffp->record_first_apts;
+                if (relative_pts < 0) relative_pts = 0;
+                pkt.pts = av_rescale_q_rnd(relative_pts, in_stream->time_base, out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+                if (DEBUG_RECORD_OPEN) {
+                    av_log(ffp, AV_LOG_INFO, "🎯 设置音频流时间基准: PTS=%lld (时间基准:%d/%d)\n",
+                           ffp->record_first_apts, in_stream->time_base.num, in_stream->time_base.den);
+                }
+            }
+
+            if (pkt.dts != AV_NOPTS_VALUE && ffp->record_first_apts != AV_NOPTS_VALUE) {
+                int64_t relative_dts = pkt.dts - ffp->record_first_apts;
+                if (relative_dts < 0) relative_dts = 0;
+                pkt.dts = av_rescale_q_rnd(relative_dts, in_stream->time_base, out_stream->time_base,
+                                           (enum AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            }
         }
     } else {
         // 其他流直接转换时间基准
