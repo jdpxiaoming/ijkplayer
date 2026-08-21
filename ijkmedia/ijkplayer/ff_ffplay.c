@@ -1311,6 +1311,10 @@ static void ffp_reset_record_static_state(void);
  {
      double sync_threshold, diff = 0;
  
+     if (ffp && ffp->delay_forbidden > 0) {
+         return 0.0;
+     }
+
      /* update delay to follow master synchronisation source */
      if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER) {
          /* if video is slave, we try to correct big delays by
@@ -1395,8 +1399,10 @@ static void ffp_reset_record_static_state(void);
          *remaining_time = FFMIN(*remaining_time, is->last_vis_time + ffp->rdftspeed - time);
      }
  
-   //放开倍速2.0限制. 
-     if (ffp->pf_playback_rate > ADJUST_POLLING_RATE_THRESHOLD &&
+   //放开倍速2.0限制与0延迟快速刷新. 
+     if (ffp->delay_forbidden > 0) {
+         *remaining_time = VIDEO_ONLY_FAST_POLLING_RATE;
+     } else if (ffp->pf_playback_rate > ADJUST_POLLING_RATE_THRESHOLD &&
              !is->audio_st) {
              *remaining_time = VIDEO_ONLY_FAST_POLLING_RATE;
          }
@@ -1431,7 +1437,7 @@ static void ffp_reset_record_static_state(void);
              time= av_gettime_relative()/1000000.0;
              if (isnan(is->frame_timer) || time < is->frame_timer)
                  is->frame_timer = time;
-             if (time < is->frame_timer + delay) {
+             if (ffp->delay_forbidden <= 0 && time < is->frame_timer + delay) {
                  *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                  goto display;
              }
@@ -1448,7 +1454,7 @@ static void ffp_reset_record_static_state(void);
              if (frame_queue_nb_remaining(&is->pictq) > 1) {
                  Frame *nextvp = frame_queue_peek_next(&is->pictq);
                  duration = vp_duration(is, vp, nextvp, ffp->delay_forbidden);
-                 if(!is->step && (ffp->framedrop > 0 || (ffp->framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration) {
+                 if(ffp->delay_forbidden <= 0 && !is->step && (ffp->framedrop > 0 || (ffp->framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration) {
                      frame_queue_next(&is->pictq);
                      goto retry;
                  }
@@ -1779,7 +1785,7 @@ static void ffp_reset_record_static_state(void);
  
          frame->sample_aspect_ratio = av_guess_sample_aspect_ratio(is->ic, is->video_st, frame);
  
-         if (ffp->framedrop>0 || (ffp->framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
+         if (ffp->delay_forbidden <= 0 && (ffp->framedrop>0 || (ffp->framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER))) {
              ffp->stat.decode_frame_count++;
              if (frame->pts != AV_NOPTS_VALUE) {
                  double diff = dpts - get_master_clock(is);
@@ -2258,10 +2264,7 @@ static void ffp_reset_record_static_state(void);
      double duration;
      int ret;
      AVRational tb = is->video_st->time_base;
-     AVRational frame_rate;
-     if(delay_forbidden == 0){
-       frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
-     } 
+     AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
      int64_t dst_pts = -1;
      int64_t last_dst_pts = -1;
      int retry_convert_image = 0;
@@ -2396,12 +2399,7 @@ static void ffp_reset_record_static_state(void);
                  is->frame_last_filter_delay = 0;
              tb = av_buffersink_get_time_base(filt_out);
  #endif
-             if(delay_forbidden == 0){//关闭0延迟 默认关闭.
-               duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
-             }else{
-               //直接这里写出
-                     duration=0.01;
-             }
+             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
              pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
              ret = queue_picture(ffp, frame, pts, duration, frame->pkt_pos, is->viddec.pkt_serial);
              av_frame_unref(frame);
